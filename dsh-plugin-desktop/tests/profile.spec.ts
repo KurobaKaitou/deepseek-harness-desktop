@@ -7,6 +7,7 @@ import { composeEntries, initProfile, PROFILE_TEMPLATES } from '@deepseek-ai/dsh
 import {
   DESKTOP_PACKAGE_NAME,
   desktopShellModeFromSettings,
+  desktopStartupSettingsFromSettings,
   desktopBundleList,
   ensureDesktopProfile,
   prepareDesktopProfile,
@@ -41,6 +42,16 @@ function installWebClient(
   }) + '\n')
   writeFileSync(join(packageDir, 'index.js'), 'export default {}\n')
   return webDir
+}
+
+function installBundle(home: string, packageName: string, patch: string): void {
+  const bundleDir = join(home, 'profiles', 'desktop', 'node_modules', packageName)
+  mkdirSync(bundleDir, { recursive: true })
+  writeFileSync(join(bundleDir, 'package.json'), JSON.stringify({
+    name: packageName,
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }) + '\n')
+  writeFileSync(join(bundleDir, 'cordis.patch.yml'), patch)
 }
 
 afterEach(() => {
@@ -277,17 +288,21 @@ describe('desktop profile composition', {
     }))
   })
 
-  it('projects advanced YAML settings into the Host and client Loader rows', () => {
+  it('projects YAML startup settings into the Host, Web server, and client Loader rows', () => {
     const home = temporaryHome()
-    writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n')
+    writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n  port: 43189\n')
 
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const rows = composeEntries([prepared.patches])
 
     expect(prepared.mode).toBe('advanced')
+    expect(prepared.port).toBe(43_189)
     expect(rows.find(row => row.id === 'desktop-shell')).toEqual(expect.objectContaining({
       disabled: false,
-      config: expect.objectContaining({ mode: 'advanced' }),
+      config: expect.objectContaining({ mode: 'advanced', port: 43_189 }),
+    }))
+    expect(rows.find(row => row.id === 'webserver')).toEqual(expect.objectContaining({
+      config: { host: '127.0.0.1', port: 43_189 },
     }))
     expect(rows.find(row => row.id === 'settings')).toEqual(expect.objectContaining({
       config: expect.objectContaining({ dshHome: home }),
@@ -303,6 +318,14 @@ describe('desktop profile composition', {
     writeFileSync(path, JSON.stringify({ 'dsh-desktop': { mode: 'advanced' } }))
 
     expect(readDesktopShellMode({ path })).toBe('advanced')
+    expect(desktopStartupSettingsFromSettings({ 'dsh-desktop': { mode: 'advanced', port: 43_189 } })).toEqual({
+      mode: 'advanced',
+      port: 43_189,
+    })
+    expect(desktopStartupSettingsFromSettings({ 'dsh-desktop': { mode: 'advanced' } })).toEqual({
+      mode: 'advanced',
+      port: 0,
+    })
     expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('compatibility')
   })
 
@@ -312,6 +335,11 @@ describe('desktop profile composition', {
     expect(() => desktopShellModeFromSettings({ 'dsh-desktop': { mode: 'glass' } })).toThrow(
       'must be "compatibility" or "advanced"',
     )
+    for (const port of [-1, 1.5, 65_536, '43189']) {
+      expect(() => desktopStartupSettingsFromSettings({ 'dsh-desktop': { port } })).toThrow(
+        'port must be an integer from 0 through 65535',
+      )
+    }
 
     const home = temporaryHome()
     const path = join(home, 'invalid.yaml')
@@ -372,6 +400,35 @@ describe('desktop profile composition', {
       disabled: { __jsExpr: "process.platform !== 'win32'" },
       config: { cwd: 'C:\\workspace' },
     }))
+  })
+
+  it('rejects a bundle and user patch that register the same loader entry id', () => {
+    const home = temporaryHome()
+    const packageName = 'dsh-usage-stats'
+    const bundlePatch = [
+      '- insert:',
+      '    - id: usage-stats',
+      `      name: '${packageName}'`,
+      '',
+    ].join('\n')
+    installBundle(home, packageName, bundlePatch)
+    const profileDir = join(home, 'profiles', 'desktop')
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-desktop',
+      private: true,
+      dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', packageName] } },
+    }) + '\n')
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- insert:',
+      '    - id: usage-stats',
+      `      name: '${packageName}'`,
+      '',
+    ].join('\n'))
+
+    expect(() => prepareDesktopProfile(undefined, home, 'win32')).toThrow(
+      'duplicate loader entry id "usage-stats" in the composed profile',
+    )
   })
 
   it('keeps a Web Client in its owning profile and omits it from desktop', () => {
