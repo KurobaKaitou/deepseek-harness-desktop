@@ -171,7 +171,7 @@
     "@deepseek-ai/dsh-client-ui-input-trigger": "file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-input-trigger-0.1.2-alpha.1.tgz",
     "@deepseek-ai/dsh-client-ui-approval": "file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-approval-0.1.2-alpha.1.tgz",
     "@deepseek-ai/dsh-session-stats": "file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-session-stats-0.1.2-alpha.1.tgz",
-    "@deepseek-ai/dsh-client-ui-chat": "file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-chat-0.1.2-alpha.1.tgz",
+    "@deepseek-ai/dsh-client-ui-chat": "patch:@deepseek-ai/dsh-client-ui-chat@file%3Avendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-chat-0.1.2-alpha.1.tgz#./patches/dsh-client-ui-chat@0.1.2-alpha.1.patch",
     "@deepseek-ai/dsh-client-ui-tool": "file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-tool-0.1.2-alpha.1.tgz",
     "@deepseek-ai/dsh-client-modules": "file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-modules-0.1.2-alpha.1.tgz",
     "@deepseek-ai/dsh-cordis-client-runner": "file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-cordis-client-runner-0.1.2-alpha.1.tgz",

@@ -1731,6 +1731,41 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@deepseek-ai/dsh-client-ui-chat@patch:@deepseek-ai/dsh-client-ui-chat@file%3Avendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-chat-0.1.2-alpha.1.tgz#./patches/dsh-client-ui-chat@0.1.2-alpha.1.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 0.1.2-alpha.1
+  resolution: "@deepseek-ai/dsh-client-ui-chat@patch:@deepseek-ai/dsh-client-ui-chat@file%3Avendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-chat-0.1.2-alpha.1.tgz%23vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-chat-0.1.2-alpha.1.tgz%3A%3Ahash=a8b01a&locator=deepseek-harness-desktop%2540workspace%253A.#./patches/dsh-client-ui-chat@0.1.2-alpha.1.patch::version=0.1.2-alpha.1&hash=b4da34&locator=deepseek-harness-desktop%40workspace%3A."
+  dependencies:
+    "@deepseek-ai/schemastery": "npm:^3.18.1"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.1
+    "@deepseek-ai/dsh-agent": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-api-remotes": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-api-session-controller": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-api-workspace-controller": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-attachment": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-client-locale": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-client-ui-approval": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-client-ui-conversation": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-client-ui-layout": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-client-ui-renderer": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-client-ui-session": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-client-ui-settings": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-client-ui-workspace": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-commands": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-compaction": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-invariants": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-llm": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-llm-retry": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-session": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-session-stats": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-settings": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-token-meter": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-tools": ^0.1.2-alpha.1
+    "@deepseek-ai/dsh-util-workspace-path": ^0.1.2-alpha.1
+  checksum: 10c0/052f008c16a10ca3f89b01075187fe9d2c9763298f98805ba6bf97489f5404f41669eb3310f242dbcd5db6ff9b650d6dca7218bc79e9dabdf530bf3a53113fbc
+  languageName: node
+  linkType: hard
+
 "@deepseek-ai/dsh-client-ui-commands@file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-commands-0.1.2-alpha.1.tgz::locator=deepseek-harness-desktop%40workspace%3A.":
   version: 0.1.2-alpha.1
   resolution: "@deepseek-ai/dsh-client-ui-commands@file:vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-commands-0.1.2-alpha.1.tgz#vendor/dsh-runtime/0.1.2-alpha.1/deepseek-ai-dsh-client-ui-commands-0.1.2-alpha.1.tgz::hash=37040b&locator=deepseek-harness-desktop%40workspace%3A."
