@@ -51,7 +51,7 @@ export interface DesktopPnpmRuntimeInstallation {
   nodeBinDir: string
   /** Private Node command shim used by pnpm lifecycle scripts. */
   nodeShimPath: string
-  /** Preloaded module that removes Electron RunAsNode from child environments. */
+  /** Preloaded module that removes Electron RunAsNode from child environments and collapses repeated pnpm policy arguments. */
   clearEnvironmentPath: string
   /** Remove this installation's PATH entry without deleting persistent generated files. */
   dispose(): void
@@ -200,10 +200,29 @@ function replacePrivateFile(filename: string, contents: string, mode: number): v
 }
 
 /** Module preloaded into RunAsNode children before their requested entry. */
-function clearEnvironmentModule(): string {
+/**
+ * Render the preloaded module shared by every Desktop pnpm invocation.
+ *
+ * Besides stripping Electron RunAsNode from the running process's inherited
+ * environment, the module collapses repeated `--config.minimumReleaseAge=`
+ * arguments down to the last one. The Desktop pnpm shims prepend the policy
+ * argument ahead of the caller's argv, and pnpm aggregates a repeated
+ * `--config` key into an array; that array then poisons the release-age date
+ * math and aborts every resolving update with `Invalid time value`. Keeping
+ * the last occurrence lets an explicit caller value win over the shim's.
+ */
+export function clearEnvironmentModule(): string {
   return [
     `for (const name of Object.keys(process.env)) {`,
     `  if (name.toUpperCase() === '${RUN_AS_NODE}') delete process.env[name]`,
+    '}',
+    `const policyPrefix = '--config.minimumReleaseAge='`,
+    'let lastPolicyIndex = -1',
+    'for (let index = 0; index < process.argv.length; index += 1) {',
+    '  if (process.argv[index].startsWith(policyPrefix)) lastPolicyIndex = index',
+    '}',
+    'if (lastPolicyIndex !== -1) {',
+    '  process.argv = process.argv.filter((argument, index) => index === lastPolicyIndex || !argument.startsWith(policyPrefix))',
     '}',
     '',
   ].join('\n')

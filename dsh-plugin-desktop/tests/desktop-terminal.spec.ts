@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { lstatSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   desktopTerminalStateDirectory,
@@ -147,6 +148,9 @@ describe('desktop terminal environment', () => {
     expect(pnpmShim).toContain('ELECTRON_RUN_AS_NODE=1 npm_config_runtime=electron')
     expect(pnpmShim).toContain("npm_config_target='43.4.0'")
     expect(pnpmShim).toContain("npm_config_disturl='https://electronjs.org/headers'")
+    expect(pnpmShim).toContain(`--import '${pathToFileURL(launch.clearEnvironmentPath).href}'`)
+    expect(pnpmShim.indexOf(`--import '${pathToFileURL(launch.clearEnvironmentPath).href}'`))
+      .toBeLessThan(pnpmShim.indexOf('pnpm/bin/pnpm.mjs'))
     expect(pnpmShim.match(/--config\.minimumReleaseAge=0/gu)).toHaveLength(1)
     expect(pnpmShim).toContain('--config.minimumReleaseAge=0 "$@"')
     const nodeShim = readFileSync(launch.nodeShimPath, 'utf8')
@@ -235,6 +239,7 @@ describe('desktop terminal environment', () => {
     expect(pnpmShim).toContain('set "npm_config_runtime=electron"')
     expect(pnpmShim).toContain('set "npm_config_target=%DSH_DESKTOP_ELECTRON_VERSION%"')
     expect(pnpmShim).toContain('set "npm_config_disturl=https://electronjs.org/headers"')
+    expect(pnpmShim).toContain('"%DSH_DESKTOP_APP_EXECUTABLE%" --import "%DSH_DESKTOP_CLEAR_ENVIRONMENT%" "%DSH_DESKTOP_PNPM_ENTRY%"')
     expect(pnpmShim.match(/--config\.minimumReleaseAge=0/gu)).toHaveLength(1)
     expect(pnpmShim).toContain('--config.minimumReleaseAge=0 %*')
     expect(readFileSync(launch.nodeShimPath, 'utf8')).toContain(
@@ -274,6 +279,7 @@ describe('desktop terminal environment', () => {
           DSH_HOME: options.homeDir,
           DSH_DESKTOP_DEFAULT_PROFILE: options.profileName,
           DSH_DESKTOP_APP_EXECUTABLE: options.appExecutable,
+          DSH_DESKTOP_CLEAR_ENVIRONMENT: launch.clearEnvironmentPath,
           DSH_DESKTOP_DSH_BOOTSTRAP: options.dshBootstrapPath,
           DSH_DESKTOP_ELECTRON_VERSION: options.electronVersion,
           DSH_DESKTOP_PNPM_ENTRY: options.pnpmBinPath,

@@ -12,7 +12,9 @@ import {
 } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { basename, dirname, join, win32 } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { assertDesktopProfileName } from './profile-manager.ts'
+import { clearEnvironmentModule } from './desktop-runtime-environment.ts'
 import { PNPM_IGNORE_MINIMUM_RELEASE_AGE } from './pnpm-policy.ts'
 
 const RUN_AS_NODE = 'ELECTRON_RUN_AS_NODE'
@@ -20,6 +22,7 @@ const DEFAULT_PROFILE = 'DSH_DESKTOP_DEFAULT_PROFILE'
 const DSH_HOME = 'DSH_HOME'
 const PATH = 'PATH'
 const WINDOWS_APP_EXECUTABLE = 'DSH_DESKTOP_APP_EXECUTABLE'
+const WINDOWS_CLEAR_ENVIRONMENT = 'DSH_DESKTOP_CLEAR_ENVIRONMENT'
 const WINDOWS_DSH_BOOTSTRAP = 'DSH_DESKTOP_DSH_BOOTSTRAP'
 const WINDOWS_ELECTRON_VERSION = 'DSH_DESKTOP_ELECTRON_VERSION'
 const WINDOWS_PNPM_ENTRY = 'DSH_DESKTOP_PNPM_ENTRY'
@@ -32,6 +35,7 @@ const WINDOWS_SHELL_EXECUTABLE = 'DSH_DESKTOP_SHELL_EXECUTABLE'
 const WINDOWS_GENERATED_ENVIRONMENT_KEYS = new Set([
   DEFAULT_PROFILE,
   WINDOWS_APP_EXECUTABLE,
+  WINDOWS_CLEAR_ENVIRONMENT,
   WINDOWS_DSH_BOOTSTRAP,
   WINDOWS_ELECTRON_VERSION,
   WINDOWS_PNPM_ENTRY,
@@ -122,6 +126,8 @@ export interface DesktopTerminalLaunch {
   pnpmShimPath: string
   /** Generated platform-specific `node` shim backed by Electron's Node mode. */
   nodeShimPath: string
+  /** Generated preloaded module shared by this terminal's pnpm shim. */
+  clearEnvironmentPath: string
   /** Generated script that configures and welcomes the interactive shell. */
   welcomePath: string
   /** Windows command broker that creates the visible console, when applicable. */
@@ -148,6 +154,7 @@ interface DesktopTerminalFiles {
   dshShimPath: string
   pnpmShimPath: string
   nodeShimPath: string
+  clearEnvironmentPath: string
   welcomePath: string
   windowsCmdWelcomePath?: string
 }
@@ -260,7 +267,7 @@ function windowsDshShim(): string {
 }
 
 /** Build a pnpm shim with Electron native-module settings scoped to its process tree. */
-function macPnpmShim(options: DesktopTerminalOptions): string {
+function macPnpmShim(options: DesktopTerminalOptions, clearEnvironmentUrl: string): string {
   return [
     '#!/bin/sh',
     [
@@ -268,7 +275,7 @@ function macPnpmShim(options: DesktopTerminalOptions): string {
       'npm_config_runtime=electron',
       `npm_config_target=${quoteSh(options.electronVersion)}`,
       `npm_config_disturl=${quoteSh(ELECTRON_HEADERS_URL)}`,
-      `exec ${quoteSh(options.appExecutable)} ${quoteSh(options.pnpmBinPath)} ${PNPM_IGNORE_MINIMUM_RELEASE_AGE} "$@"`,
+      `exec ${quoteSh(options.appExecutable)} --import ${quoteSh(clearEnvironmentUrl)} ${quoteSh(options.pnpmBinPath)} ${PNPM_IGNORE_MINIMUM_RELEASE_AGE} "$@"`,
     ].join(' '),
     '',
   ].join('\n')
@@ -283,7 +290,7 @@ function windowsPnpmShim(): string {
     'set "npm_config_runtime=electron"',
     `set "npm_config_target=%${WINDOWS_ELECTRON_VERSION}%"`,
     `set "npm_config_disturl=${ELECTRON_HEADERS_URL}"`,
-    `"%${WINDOWS_APP_EXECUTABLE}%" "%${WINDOWS_PNPM_ENTRY}%" ${PNPM_IGNORE_MINIMUM_RELEASE_AGE} %*`,
+    `"%${WINDOWS_APP_EXECUTABLE}%" --import "%${WINDOWS_CLEAR_ENVIRONMENT}%" "%${WINDOWS_PNPM_ENTRY}%" ${PNPM_IGNORE_MINIMUM_RELEASE_AGE} %*`,
     'exit /b %errorlevel%',
     '',
   ].join('\r\n')
@@ -445,17 +452,21 @@ function prepareDesktopTerminalFiles(options: DesktopTerminalOptions): DesktopTe
   prepareStateDirectory(options.stateDir)
   const shimDir = join(options.stateDir, 'bin')
   prepareStateDirectory(shimDir)
+  const clearEnvironmentPath = join(options.stateDir, 'clear-env.mjs')
+  replacePrivateFile(clearEnvironmentPath, clearEnvironmentModule(), PRIVATE_FILE_MODE)
+  const clearEnvironmentUrl = pathToFileURL(clearEnvironmentPath).href
   if (options.platform === 'darwin') {
     const files: DesktopTerminalFiles = {
       shimDir,
       dshShimPath: join(shimDir, 'dsh'),
       pnpmShimPath: join(shimDir, 'pnpm'),
       nodeShimPath: join(shimDir, 'node'),
+      clearEnvironmentPath,
       welcomePath: join(options.stateDir, 'welcome.command'),
     }
     const bashRcPath = join(options.stateDir, 'bashrc')
     replacePrivateFile(files.dshShimPath, macDshShim(options), EXECUTABLE_FILE_MODE)
-    replacePrivateFile(files.pnpmShimPath, macPnpmShim(options), EXECUTABLE_FILE_MODE)
+    replacePrivateFile(files.pnpmShimPath, macPnpmShim(options, clearEnvironmentUrl), EXECUTABLE_FILE_MODE)
     replacePrivateFile(files.nodeShimPath, macShim(options.appExecutable), EXECUTABLE_FILE_MODE)
     replacePrivateFile(join(options.stateDir, '.zshrc'), macZshRc(options, shimDir), PRIVATE_FILE_MODE)
     replacePrivateFile(bashRcPath, macBashRc(options, shimDir), PRIVATE_FILE_MODE)
@@ -469,6 +480,7 @@ function prepareDesktopTerminalFiles(options: DesktopTerminalOptions): DesktopTe
       dshShimPath: join(shimDir, 'dsh.cmd'),
       pnpmShimPath: join(shimDir, 'pnpm.cmd'),
       nodeShimPath: join(shimDir, 'node.cmd'),
+      clearEnvironmentPath,
       welcomePath: join(options.stateDir, 'welcome.ps1'),
       windowsCmdWelcomePath,
     }
@@ -508,6 +520,7 @@ function terminalEnvironment(options: DesktopTerminalOptions, files: DesktopTerm
   if (options.platform === 'win32') {
     env[DEFAULT_PROFILE] = options.profileName
     env[WINDOWS_APP_EXECUTABLE] = options.appExecutable
+    env[WINDOWS_CLEAR_ENVIRONMENT] = files.clearEnvironmentPath
     env[WINDOWS_DSH_BOOTSTRAP] = options.dshBootstrapPath
     env[WINDOWS_ELECTRON_VERSION] = options.electronVersion
     env[WINDOWS_PNPM_ENTRY] = options.pnpmBinPath
@@ -725,6 +738,7 @@ export function openDesktopTerminal(options: DesktopTerminalOptions): DesktopTer
     dshShimPath: files.dshShimPath,
     pnpmShimPath: files.pnpmShimPath,
     nodeShimPath: files.nodeShimPath,
+    clearEnvironmentPath: files.clearEnvironmentPath,
     welcomePath: files.welcomePath,
     ...(windowsLauncherPath === undefined ? {} : { windowsLauncherPath }),
     child,
