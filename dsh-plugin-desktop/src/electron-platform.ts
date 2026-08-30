@@ -1,6 +1,6 @@
 import { app, Menu } from 'electron'
 import type { BrowserWindow, MenuItemConstructorOptions, NativeImage } from 'electron'
-import { macApplicationMenuTemplate, nativeMenuLocale } from './native-menu.ts'
+import { macApplicationMenuTemplate, nativeMenuLocale, textContextMenuTemplate } from './native-menu.ts'
 import type { DesktopPlatform } from './runtime.ts'
 import type { DesktopWindowMaterial } from './window-material.ts'
 import type { DesktopDownloadPlatform } from './update-download.ts'
@@ -37,6 +37,24 @@ class WindowsPlatformStrategy implements ElectronPlatformStrategy {
 
   configureWindow(window: BrowserWindow): void {
     window.removeMenu()
+    // Windows has no application Edit menu to carry the text-editing roles,
+    // so a right-click on editable text or a selection pops the equivalent
+    // localized menu instead of doing nothing (issue #653).
+    window.webContents.on('context-menu', (_event, parameters) => {
+      const items = textContextMenuTemplate(
+        nativeMenuLocale(app.getPreferredSystemLanguages()),
+        {
+          isEditable: parameters.isEditable,
+          selectionNonEmpty: parameters.selectionText.length > 0,
+          canCut: parameters.editFlags.canCut,
+          canCopy: parameters.editFlags.canCopy,
+          canPaste: parameters.editFlags.canPaste,
+          canSelectAll: parameters.editFlags.canSelectAll,
+        },
+      )
+      if (items.length === 0) return
+      Menu.buildFromTemplate(items).popup({ window })
+    })
   }
 
   refreshThemeMaterial(window: BrowserWindow, material: DesktopWindowMaterial): void {

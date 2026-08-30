@@ -186,3 +186,45 @@ export function macApplicationMenuTemplate(
     },
   ]
 }
+
+/** Minimal webContents snapshot that decides the text-editing context menu. */
+export interface TextContextMenuState {
+  /** The context-menu target accepts text input. */
+  readonly isEditable: boolean
+  /** The context-menu target holds a non-empty text selection. */
+  readonly selectionNonEmpty: boolean
+  /** webContents editFlags snapshot: whether cut applies. */
+  readonly canCut: boolean
+  /** webContents editFlags snapshot: whether copy applies. */
+  readonly canCopy: boolean
+  /** webContents editFlags snapshot: whether paste applies. */
+  readonly canPaste: boolean
+  /** webContents editFlags snapshot: whether select-all applies. */
+  readonly canSelectAll: boolean
+}
+
+/**
+ * Build the localized text-editing context menu for platforms without a
+ * native Edit menu. Returns an empty template for targets that offer no
+ * text action, letting the caller skip the popup entirely.
+ */
+export function textContextMenuTemplate(
+  locale: NativeMenuLocale,
+  state: TextContextMenuState,
+): MenuItemConstructorOptions[] {
+  if (!state.isEditable && !state.selectionNonEmpty) return []
+  const label = LABELS[locale]
+  const items: MenuItemConstructorOptions[] = []
+  if (state.isEditable) {
+    if (state.canCut) items.push({ label: label.cut, role: 'cut' })
+    if (state.canCopy) items.push({ label: label.copy, role: 'copy' })
+    if (state.canPaste) items.push({ label: label.paste, role: 'paste' })
+  } else if (state.canCopy) {
+    items.push({ label: label.copy, role: 'copy' })
+  }
+  if (state.canSelectAll) {
+    if (items.length > 0) items.push({ type: 'separator' })
+    items.push({ label: label.selectAll, role: 'selectAll' })
+  }
+  return items
+}
