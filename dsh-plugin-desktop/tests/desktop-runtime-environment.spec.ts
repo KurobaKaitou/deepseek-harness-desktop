@@ -95,6 +95,9 @@ describe('desktop Host pnpm runtime', () => {
     expect(readFileSync(installation.clearEnvironmentPath, 'utf8')).toContain(
       "name.toUpperCase() === 'ELECTRON_RUN_AS_NODE'",
     )
+    expect(readFileSync(installation.clearEnvironmentPath, 'utf8')).toContain(
+      "const policyPrefix = '--config.minimumReleaseAge='",
+    )
 
     expect(environment).toEqual({
       ...original,
@@ -157,14 +160,68 @@ describe('desktop Host pnpm runtime', () => {
     const captureOutput = join(root, 'capture.json')
     writeFileSync(captureEntry, [
       "import { writeFileSync } from 'node:fs'",
-      'writeFileSync(process.argv.at(-1), JSON.stringify({',
-      "  ignoresMinimumReleaseAge: process.argv.includes('--config.minimumReleaseAge=0'),",
+      'writeFileSync(process.argv[2], JSON.stringify({',
+      "  policyArguments: process.argv.slice(3).filter(argument => argument.startsWith('--config.minimumReleaseAge=')),",
       "  runAsNode: Object.keys(process.env).filter(name => name.toUpperCase() === 'ELECTRON_RUN_AS_NODE'),",
       '  runtime: process.env.npm_config_runtime,',
       '  target: process.env.npm_config_target,',
       '  disturl: process.env.npm_config_disturl,',
       '  node: process.env.NODE,',
       '  path: process.env.PATH,',
+      '}))',
+      '',
+    ].join('\n'))
+    const platform = process.platform === 'win32' ? 'win32' : 'linux'
+    const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH }
+    const installation = installDesktopPnpmRuntime({
+      ...options(stateDir, platform, environment),
+      appExecutable: process.execPath,
+      pnpmBinPath: captureEntry,
+    })
+
+    // The shim prepends its own policy argument; the caller repeats one with a
+    // different value, which the preloaded module must collapse to the caller's.
+    const callerArguments = process.platform === 'win32'
+      ? ['--config.minimumReleaseAge=1440']
+      : [captureOutput, '--config.minimumReleaseAge=1440']
+    const command = process.platform === 'win32'
+      ? process.env.ComSpec ?? 'cmd.exe'
+      : installation.pnpmShimPath
+    const args = process.platform === 'win32'
+      ? ['/d', '/s', '/c', `""${installation.pnpmShimPath}" "${captureOutput}" "--config.minimumReleaseAge=1440""`]
+      : callerArguments
+    const result = spawnSync(command, args, {
+      encoding: 'utf8',
+      env: environment,
+      shell: false,
+      windowsVerbatimArguments: process.platform === 'win32',
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+    expect(JSON.parse(readFileSync(captureOutput, 'utf8'))).toEqual({
+      policyArguments: ['--config.minimumReleaseAge=1440'],
+      runAsNode: [],
+      runtime: 'electron',
+      target: '43.4.0',
+      disturl: 'https://electronjs.org/headers',
+      node: installation.nodeShimPath,
+      path: `${installation.nodeBinDir}${pathDelimiter}${environment.PATH ?? ''}`,
+    })
+    expect(environment).not.toHaveProperty('ELECTRON_RUN_AS_NODE')
+    expect(environment).not.toHaveProperty('npm_config_runtime')
+    installation.dispose()
+  })
+
+  it('keeps exactly one policy argument when the caller passes none', () => {
+    const root = temporaryDirectory()
+    const stateDir = join(root, 'runtime')
+    const captureEntry = join(root, 'capture.mjs')
+    const captureOutput = join(root, 'capture.json')
+    writeFileSync(captureEntry, [
+      "import { writeFileSync } from 'node:fs'",
+      'writeFileSync(process.argv.at(-1), JSON.stringify({',
+      "  policyArguments: process.argv.filter(argument => argument.startsWith('--config.minimumReleaseAge=')),",
       '}))',
       '',
     ].join('\n'))
@@ -192,16 +249,8 @@ describe('desktop Host pnpm runtime', () => {
     expect(result.error).toBeUndefined()
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
     expect(JSON.parse(readFileSync(captureOutput, 'utf8'))).toEqual({
-      ignoresMinimumReleaseAge: true,
-      runAsNode: [],
-      runtime: 'electron',
-      target: '43.4.0',
-      disturl: 'https://electronjs.org/headers',
-      node: installation.nodeShimPath,
-      path: `${installation.nodeBinDir}${pathDelimiter}${environment.PATH ?? ''}`,
+      policyArguments: ['--config.minimumReleaseAge=0'],
     })
-    expect(environment).not.toHaveProperty('ELECTRON_RUN_AS_NODE')
-    expect(environment).not.toHaveProperty('npm_config_runtime')
     installation.dispose()
   })
 
