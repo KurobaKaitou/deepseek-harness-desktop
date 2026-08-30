@@ -379,6 +379,14 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'desktop-profiles')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-desktop/profiles',
     }))
+    // The upstream Web bundle mounts the client-plugin reload chain
+    // unconditionally; a Desktop launch never runs a rebuild watcher, so the
+    // Desktop layer drops the row instead of polling rewritten bundles that
+    // cannot happen (issue #587).
+    expect(rows.find(row => row.id === 'client-hmr')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-client-hmr',
+      disabled: true,
+    }))
   })
 
   it('merges a frozen LAN IPv4 snapshot into existing Web runtime trust', () => {

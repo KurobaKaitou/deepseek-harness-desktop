@@ -26,3 +26,11 @@
     printUrl: false
     surfaceContext: true
     trustedHosts: []
+
+# The upstream Web bundle mounts the client-plugin reload chain unconditionally,
+# leaving a 500ms statSync poll running even where no rebuild watcher will ever
+# rewrite client bundles. A Desktop launch rebuilds through `yarn build` and an
+# application restart, so the chain stays idle forever here; drop the row
+# instead of polling for rewrites that cannot happen (issue #587).
+- id: client-hmr
+  disabled: true
