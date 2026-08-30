@@ -14,17 +14,26 @@ export const DESKTOP_RECOVERY_RESTART_REQUEST = Object.freeze({
 /** Backwards-compatible request name retained for downstream imports. */
 export const DESKTOP_TERMINAL_OPEN_REQUEST = DESKTOP_RECOVERY_RESTART_REQUEST
 
-/** Minimal presentation for the one early-boot Recovery Mode action. */
+/** Minimal presentation for the early-boot recovery guidance and action. */
 export const DESKTOP_BOOT_RECOVERY_STYLE = `
 [data-dsh-desktop-recovery] {
+  --dsh-recovery-muted: var(--dsw-alias-label-secondary, var(--dsh-boot-label-secondary, #61666b));
   --dsh-recovery-primary-bg: var(--dsw-alias-button-primary-fill, var(--dsh-boot-brand, #0f1115));
   --dsh-recovery-primary-hover: var(--dsw-alias-button-primary-hover, #303238);
   --dsh-recovery-primary-fg: var(--dsw-alias-label-primary-foreground, #fff);
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
   width: min(480px, calc(100vw - 48px));
-  color: var(--dsh-recovery-primary-fg);
+  margin-top: 8px;
+  color: var(--dsh-recovery-muted);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+[data-dsh-desktop-recovery] p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
 }
 [data-dsh-desktop-recovery] button {
   min-height: 40px;
@@ -49,12 +58,14 @@ export const DESKTOP_BOOT_RECOVERY_STYLE = `
   opacity: 0.52;
 }
 body[data-ds-dark-theme] [data-dsh-desktop-recovery] {
+  --dsh-recovery-muted: #cfd3d6;
   --dsh-recovery-primary-bg: #f9fafb;
   --dsh-recovery-primary-hover: #dfe3e6;
   --dsh-recovery-primary-fg: #151517;
 }
 @media (prefers-color-scheme: dark) {
   [data-dsh-desktop-recovery] {
+    --dsh-recovery-muted: #cfd3d6;
     --dsh-recovery-primary-bg: #f9fafb;
     --dsh-recovery-primary-hover: #dfe3e6;
     --dsh-recovery-primary-fg: #151517;
@@ -66,11 +77,12 @@ body[data-ds-dark-theme] [data-dsh-desktop-recovery] {
 }
 `
 
-/** Replace the upstream plugin-failure report with one Recovery Mode button. */
+/** Preserve the upstream plugin-failure report and append Desktop recovery guidance. */
 export const DESKTOP_BOOT_RECOVERY_SCRIPT = `(() => {
   const endpoint = ${JSON.stringify(DESKTOP_RECOVERY_RESTART_PATH)};
   const request = ${JSON.stringify(DESKTOP_RECOVERY_RESTART_REQUEST)};
   const label = '打开恢复模式 / Open Recovery Mode';
+  const description = '部分插件加载失败，可能与当前 DSH 版本不兼容。你可以进入恢复模式卸载有问题的插件，或新建 Profile 后重新启动。 / Some plugins failed to load and may be incompatible with this DSH version. Open Recovery Mode to uninstall the affected plugins or create a new Profile, then restart DSH Desktop.';
   const element = (tag, attributes, content) => {
     const node = document.createElement(tag);
     for (const [name, value] of Object.entries(attributes || {})) {
@@ -87,8 +99,7 @@ export const DESKTOP_BOOT_RECOVERY_SCRIPT = `(() => {
       node.childElementCount === 0 && node.textContent?.trim() === 'Failed to load plugins'
     );
     const report = title?.parentElement;
-    const container = report?.parentElement;
-    if (!container) return;
+    if (!report) return;
     const panel = element('section', {
       'aria-label': label,
       dataset: { dshDesktopRecovery: '' },
@@ -103,8 +114,8 @@ export const DESKTOP_BOOT_RECOVERY_SCRIPT = `(() => {
         button.disabled = false;
       }
     });
-    panel.append(button);
-    container.replaceChildren(panel);
+    panel.append(element('p', {}, description), button);
+    report.append(panel);
   };
   new MutationObserver(attach).observe(document.documentElement, { childList: true, subtree: true });
   attach();

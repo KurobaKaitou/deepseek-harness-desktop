@@ -11,7 +11,7 @@ import {
 import { DESKTOP_RECOVERY_RESTART_PATH } from '../src/desktop-settings-contract.ts'
 
 describe('Desktop early-boot recovery injection', () => {
-  it('replaces the plugin-failure card with one accessible Recovery Mode action', () => {
+  it('preserves the plugin-failure report and appends accessible Recovery Mode guidance', () => {
     expect(desktopBootRecoveryInjections()).toEqual([
       { kind: 'style', text: DESKTOP_BOOT_RECOVERY_STYLE },
       { kind: 'script', placement: 'body', text: DESKTOP_BOOT_RECOVERY_SCRIPT },
@@ -23,8 +23,11 @@ describe('Desktop early-boot recovery injection', () => {
     expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain(DESKTOP_RECOVERY_RESTART_PATH)
     expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain(JSON.stringify(DESKTOP_RECOVERY_RESTART_REQUEST))
     expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain('打开恢复模式 / Open Recovery Mode')
+    expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain('部分插件加载失败，可能与当前 DSH 版本不兼容')
+    expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain('Some plugins failed to load and may be incompatible with this DSH version')
     expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain("'aria-label': label")
-    expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain('container.replaceChildren(panel)')
+    expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain('report.append(panel)')
+    expect(DESKTOP_BOOT_RECOVERY_SCRIPT).not.toContain('replaceChildren')
     expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain('const response = await fetch(endpoint, request)')
     expect(DESKTOP_BOOT_RECOVERY_SCRIPT).toContain('button.disabled = false')
     expect(DESKTOP_BOOT_RECOVERY_SCRIPT.match(/element\('button'/gu)).toHaveLength(1)
