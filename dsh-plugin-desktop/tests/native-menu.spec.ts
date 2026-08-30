@@ -1,6 +1,6 @@
 import type { MenuItemConstructorOptions } from 'electron'
 import { describe, expect, it, vi } from 'vitest'
-import { macApplicationMenuTemplate, nativeMenuLocale } from '../src/native-menu.ts'
+import { macApplicationMenuTemplate, nativeMenuLocale, textContextMenuTemplate } from '../src/native-menu.ts'
 
 function submenu(item: MenuItemConstructorOptions): MenuItemConstructorOptions[] {
   if (!Array.isArray(item.submenu)) throw new Error('expected an array submenu')
@@ -70,5 +70,46 @@ describe('native macOS application menu', () => {
       }),
     ]))
     expect(submenu(template[0]!).filter(item => item.type === 'separator')).toHaveLength(4)
+  })
+})
+
+describe('text editing context menu', () => {
+  const editableState = {
+    isEditable: true,
+    selectionNonEmpty: false,
+    canCut: true,
+    canCopy: true,
+    canPaste: true,
+    canSelectAll: true,
+  }
+
+  it('offers the complete localized text actions on an editable target', () => {
+    expect(textContextMenuTemplate('zh-CN', editableState)).toEqual([
+      { label: '剪切', role: 'cut' },
+      { label: '拷贝', role: 'copy' },
+      { label: '粘贴', role: 'paste' },
+      { type: 'separator' },
+      { label: '全选', role: 'selectAll' },
+    ])
+  })
+
+  it('skips inapplicable edit actions without dropping the rest', () => {
+    expect(textContextMenuTemplate('en', { ...editableState, canCut: false, canPaste: false })).toEqual([
+      { label: 'Copy', role: 'copy' },
+      { type: 'separator' },
+      { label: 'Select All', role: 'selectAll' },
+    ])
+  })
+
+  it('offers only copy on a non-editable selection', () => {
+    expect(textContextMenuTemplate('en', { ...editableState, isEditable: false, selectionNonEmpty: true })).toEqual([
+      { label: 'Copy', role: 'copy' },
+      { type: 'separator' },
+      { label: 'Select All', role: 'selectAll' },
+    ])
+  })
+
+  it('returns an empty template for plain non-editable content', () => {
+    expect(textContextMenuTemplate('en', { ...editableState, isEditable: false })).toEqual([])
   })
 })
