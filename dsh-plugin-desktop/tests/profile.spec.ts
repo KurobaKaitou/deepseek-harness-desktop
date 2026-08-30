@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -318,8 +318,21 @@ virtualStoreDirMaxLength: 60
     }))
     expect(patches).toContainEqual(expect.objectContaining({
       id: 'agent-presets',
-      config: expect.objectContaining({ roots: [expect.objectContaining({ trust: 'system' })] }),
+      config: expect.objectContaining({
+        roots: [
+          { path: shippedPresetRoot(), trust: 'system' },
+          { path: join(home, '.agent-presets'), trust: 'user' },
+          { path: join(prepared.profile.dir, 'agent-preset-compat'), trust: 'system' },
+        ],
+        includeUserRoot: false,
+      }),
     }))
+    expect(existsSync(join(
+      prepared.profile.dir,
+      'agent-preset-compat',
+      'code',
+      'agent.cordis.yml',
+    ))).toBe(true)
     expect(readFileSync(prepared.rootConfig, 'utf8')).toBe('[]\n')
     expect(prepared.homeDir).toBe(home)
     expect(fileURLToPath(prepared.bareModuleBaseUrl)).toBe(join(prepared.profile.dir, 'package.json'))
@@ -952,7 +965,12 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'agent-presets')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-agent-presets',
       config: expect.objectContaining({
-        roots: [{ path: shippedPresetRoot(), trust: 'system' }],
+        roots: [
+          { path: shippedPresetRoot(), trust: 'system' },
+          { path: join(home, '.agent-presets'), trust: 'user' },
+          { path: join(prepared.profile.dir, 'agent-preset-compat'), trust: 'system' },
+        ],
+        includeUserRoot: false,
       }),
     }))
     expect(rows.find(row => row.id === 'agent-presets')?.disabled).toBeFalsy()
