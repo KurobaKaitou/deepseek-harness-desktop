@@ -20,6 +20,7 @@ const allowedDifferences = new Set([
   'main.ts',
   'native-ui/setup-wizard/App.tsx',
   'notifications.ts',
+  'packaged-runtime-smoke.ts',
   'product-identity.ts',
   'profile-manager.ts',
   'profile.ts',

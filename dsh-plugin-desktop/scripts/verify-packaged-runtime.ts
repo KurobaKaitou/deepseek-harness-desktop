@@ -3,26 +3,60 @@
 import { spawnSync } from 'node:child_process'
 import {
   existsSync,
-  mkdirSync,
+  lstatSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
-  writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { Worker } from 'node:worker_threads'
-import { listPackage } from '@electron/asar'
-import AdmZip from 'adm-zip'
+import { dirname, join, parse } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { getRawHeader } from '@electron/asar'
 import {
   FORBIDDEN_MACOS_UNIVERSAL_ENTRIES,
   MACOS_UNIVERSAL_NATIVE_ENTRIES,
 } from './mac-universal.ts'
 
-const DSH_PACKAGE_ROOT = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json'))
-const PNPM_PACKAGE_ROOT = dirname(createRequire(import.meta.url).resolve('pnpm/package.json'))
+/** Resolve a package root even when its exports hide `package.json`. */
+export function resolveRuntimePackageRoot(
+  packageName: string,
+  resolveEntry: (specifier: string) => string = createRequire(import.meta.url).resolve,
+  readManifest: (filename: string) => string = filename => readFileSync(filename, 'utf8'),
+): string {
+  let manifestCause: unknown
+  try {
+    return dirname(resolveEntry(`${packageName}/package.json`))
+  } catch (cause) {
+    manifestCause = cause
+  }
+
+  let directory = dirname(resolveEntry(packageName))
+  const root = parse(directory).root
+  while (true) {
+    try {
+      const manifest: unknown = JSON.parse(readManifest(join(directory, 'package.json')))
+      if (manifest !== null
+        && typeof manifest === 'object'
+        && (manifest as { name?: unknown }).name === packageName) {
+        return directory
+      }
+    } catch {
+      // Continue toward the filesystem root until the owning manifest is found.
+    }
+    if (directory === root) {
+      throw new Error(`dsh-plugin-desktop: cannot locate package root for ${packageName}`, {
+        cause: manifestCause,
+      })
+    }
+    directory = dirname(directory)
+  }
+}
+
+const DSH_PACKAGE_ROOT = resolveRuntimePackageRoot('@deepseek-ai/dsh')
+const PNPM_PACKAGE_ROOT = resolveRuntimePackageRoot('pnpm')
+const DESKTOP_PACKAGE_ROOT = fileURLToPath(new URL('../', import.meta.url))
 
 function packageVersion(packageRoot: string): string {
   return (JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as { version: string }).version
@@ -33,6 +67,25 @@ const PNPM_RUNTIME_VERSION = packageVersion(PNPM_PACKAGE_ROOT)
 
 /** Maximum physical file count accepted beside ASAR after smart unpack. */
 export const MAX_UNPACKED_RUNTIME_FILES = 1_500
+
+/** Maximum physical payload accepted beside ASAR after smart unpack. */
+export const MAX_UNPACKED_RUNTIME_BYTES = 128 * 1024 * 1024
+
+/** Native package roots electron-builder may unpack as one indivisible unit. */
+export const ALLOWED_SMART_UNPACK_PACKAGE_ROOTS = [
+  'node_modules/koffi',
+  'node_modules/node-addon-require-builtin',
+  'node_modules/node-pty',
+  'node_modules/sharp',
+] as const
+
+/** Platform package families selected by native dependencies at package time. */
+export const ALLOWED_SMART_UNPACK_PACKAGE_PREFIXES = [
+  'node_modules/@img/sharp-',
+  'node_modules/@koromix/koffi-',
+  'node_modules/@vscode/ripgrep-',
+  'node_modules/node-addon-require-builtin-',
+] as const
 
 /** Every generated JavaScript file shipped by the installed DSH CLI package. */
 export const REQUIRED_DSH_CLI_RUNTIME_ENTRIES = Object.freeze(
@@ -52,36 +105,20 @@ export interface PackagedRuntimeContext {
   readonly electronPlatformName: string
   /** Product metadata used to locate the macOS application bundle. */
   readonly packager: {
+    /** Electron Builder project root containing the completed lib/ build output. */
+    readonly projectDir?: string
+    /** LinuxPackager's executable name differs from appInfo.productFilename by default. */
+    readonly executableName?: string
     readonly appInfo: {
       readonly productFilename: string
     }
   }
 }
 
-/** Exact archive entries required by the desktop launcher on every supported platform. */
+/** Stable non-desktop archive entries required by the packaged runtime. */
 export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'package.json',
-  'lib/main.js',
-  'lib/client.js',
-  'lib/native-ui/profile-create.html',
-  'lib/native-ui/recovery.html',
-  'lib/native-ui/setup-wizard.html',
-  'lib/profile.js',
-  'lib/profile-manager.js',
-  'lib/profile-service.js',
-  'lib/pnpm.js',
-  'lib/profiles.js',
-  'lib/diagnostics.js',
-  'lib/diagnostic-export-worker.js',
-  'lib/packaged-runtime-smoke.js',
-  'lib/desktop-cli.js',
-  'lib/desktop-runtime-environment.js',
-  'lib/desktop-terminal.js',
-  'lib/terminal.js',
-  'lib/update-checker.js',
-  'lib/update-download.js',
-  'lib/updates.js',
-  'lib/windows-acl-runner.js',
+  'cordis.patch.yml',
   ...REQUIRED_DSH_CLI_RUNTIME_ENTRIES,
   'node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
@@ -90,30 +127,26 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/pnpm/bin/pnpm.mjs',
 ] as const
 
-/** Small desktop-owned surface intentionally kept physical beside app.asar. */
-export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
-  'build/app-icon.png',
+/** macOS-only desktop assets loaded by nativeImage from physical paths. */
+export const REQUIRED_MACOS_UNPACKED_RUNTIME_ENTRIES = [
   'build/app-icon-mac.png',
   'build/tray-iconTemplate.png',
+  'build/tray-iconTemplate@2x.png',
+] as const
+
+/** Windows/Linux desktop assets, including nativeImage scale variants. */
+export const REQUIRED_NON_MACOS_UNPACKED_RUNTIME_ENTRIES = [
+  'build/app-icon.png',
   'build/tray-icon-blue.png',
-  'lib/main.js',
-  'lib/client.js',
-  'lib/native-ui/profile-create.html',
-  'lib/native-ui/recovery.html',
-  'lib/native-ui/setup-wizard.html',
-  'lib/index.js',
-  'lib/profile.js',
-  'lib/profile-manager.js',
-  'lib/profile-service.js',
-  'lib/pnpm.js',
-  'lib/profiles.js',
-  'lib/diagnostics.js',
-  'lib/diagnostic-export-worker.js',
-  'lib/packaged-runtime-smoke.js',
-  'lib/terminal.js',
-  'lib/update-download.js',
-  'lib/updates.js',
-  'lib/windows-pwsh-sandbox.js',
+  'build/tray-icon-blue@1.25x.png',
+  'build/tray-icon-blue@1.5x.png',
+  'build/tray-icon-blue@2x.png',
+] as const
+
+/** Complete cross-platform asset surface, used only as a closed allowlist. */
+export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
+  ...REQUIRED_MACOS_UNPACKED_RUNTIME_ENTRIES,
+  ...REQUIRED_NON_MACOS_UNPACKED_RUNTIME_ENTRIES,
 ] as const
 
 /** Ordinary modules that must stay archived to prevent a full physical mirror regression. */
@@ -144,36 +177,53 @@ export const REQUIRED_MACOS_UNIVERSAL_ENTRIES = [
   ...MACOS_UNIVERSAL_NATIVE_ENTRIES.map(entry => entry.path),
 ] as const
 
-/** Injectable archive listing seam used by focused tests. */
-export type ArchiveLister = (archivePath: string, options: { isPack: boolean }) => readonly string[]
+/** Minimal raw ASAR header surface returned by @electron/asar. */
+export interface RawAsarHeader {
+  readonly header: unknown
+}
+
+/** Injectable raw-header reader used by focused tests. */
+export type ArchiveHeaderReader = (archivePath: string) => RawAsarHeader
+
+/** Canonical ASAR leaf paths and the subset whose payloads live beside the archive. */
+export interface PackagedAsarIndex {
+  readonly files: ReadonlySet<string>
+  readonly unpackedFiles: ReadonlySet<string>
+}
+
+/** Injectable desktop build-output inventory used by focused tests. */
+export type DesktopRuntimeLister = (libRoot: string) => readonly string[]
 
 /** Injectable physical-file probe used by focused tests. */
 export type FileProbe = (filename: string) => boolean
 
-/** Injectable physical unpacked-file inventory used by focused tests. */
-export type UnpackedFileLister = (unpackedRoot: string) => readonly string[]
-
-/** Inputs understood by the bundled diagnostics Worker. */
-export interface PackagedDiagnosticWorkerData {
-  readonly logsDir: string
-  readonly userDataDir: string
-  readonly appVersion: string
-  readonly maxEvidenceBytes: number
-  readonly crashDumpsDir: string
+/** One physical file emitted beside app.asar. */
+export interface UnpackedRuntimeFile {
+  readonly path: string
+  readonly bytes: number
 }
 
-/** Injectable packaged Worker launcher used by focused tests. */
-export type PackagedDiagnosticWorkerLauncher = (
-  workerPath: string,
-  workerData: PackagedDiagnosticWorkerData,
-) => Promise<string>
+/** One package-root or desktop-root inventory bucket. */
+export interface UnpackedRuntimeGroup {
+  readonly root: string
+  readonly files: number
+  readonly bytes: number
+}
 
-/** Injectable smoke seam used to verify afterPack ordering. */
-export type PackagedDiagnosticWorkerSmoke = (unpackedRoot: string) => Promise<void>
+/** Bounded physical payload summary printed by afterPack. */
+export interface UnpackedRuntimeSummary {
+  readonly files: number
+  readonly bytes: number
+  readonly groups: readonly UnpackedRuntimeGroup[]
+}
+
+/** Injectable physical unpacked-file inventory used by focused tests. */
+export type UnpackedFileLister = (unpackedRoot: string) => readonly UnpackedRuntimeFile[]
 
 /** Result surface required from one packaged Electron child. */
 export interface PackagedElectronResult {
   readonly error?: Error
+  readonly signal?: NodeJS.Signals | null
   readonly status: number | null
   readonly stdout: string
   readonly stderr: string
@@ -186,86 +236,8 @@ export type PackagedElectronRunner = (
   environment: NodeJS.ProcessEnv,
 ) => PackagedElectronResult
 
-/** Injectable ASAR/CLI/native smoke seam used to verify afterPack ordering. */
+/** Injectable ASAR/CLI/native smoke seam used by the post-fuse artifact hook. */
 export type PackagedElectronSmoke = (context: PackagedRuntimeContext) => void
-
-/** Result posted by the bundled diagnostics Worker. */
-type PackagedDiagnosticWorkerResult =
-  | { readonly ok: true, readonly path: string }
-  | { readonly ok: false, readonly error: string }
-
-const PACKAGED_DIAGNOSTIC_WORKER_TIMEOUT_MS = 30_000
-
-/** Start the physical packaged diagnostics Worker and wait for its terminal result. */
-async function launchPackagedDiagnosticWorker(
-  workerPath: string,
-  workerData: PackagedDiagnosticWorkerData,
-): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    const worker = new Worker(workerPath, {
-      name: 'dsh-packaged-diagnostic-smoke',
-      workerData,
-      resourceLimits: { maxOldGenerationSizeMb: 256 },
-    })
-    let settled = false
-    const timeout = setTimeout(() => {
-      if (settled) return
-      settled = true
-      void worker.terminate()
-      reject(new Error(
-        `dsh-plugin-desktop: packaged diagnostic worker timed out after ${String(PACKAGED_DIAGNOSTIC_WORKER_TIMEOUT_MS)}ms`,
-      ))
-    }, PACKAGED_DIAGNOSTIC_WORKER_TIMEOUT_MS)
-    const settle = (complete: () => void): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      void worker.terminate()
-      complete()
-    }
-    worker.once('message', (result: PackagedDiagnosticWorkerResult) => {
-      if (result.ok) settle(() => resolve(result.path))
-      else settle(() => reject(new Error(result.error)))
-    })
-    worker.once('error', cause => settle(() => reject(cause)))
-    worker.once('exit', (code) => {
-      settle(() => reject(new Error(
-        `dsh-plugin-desktop: packaged diagnostic worker exited with code ${String(code)}`,
-      )))
-    })
-  })
-}
-
-/** Exercise the physical Worker emitted beside app.asar with a minimal archive. */
-export async function smokePackagedDiagnosticWorker(
-  unpackedRoot: string,
-  launch: PackagedDiagnosticWorkerLauncher = launchPackagedDiagnosticWorker,
-): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), 'dsh-packaged-diagnostics-'))
-  const logsDir = join(root, 'logs')
-  const userDataDir = join(root, 'user-data')
-  const crashDumpsDir = join(root, 'Crashpad')
-  mkdirSync(logsDir)
-  mkdirSync(userDataDir)
-  mkdirSync(join(crashDumpsDir, 'pending'), { recursive: true })
-  writeFileSync(join(logsDir, 'dsh-2000-01-01.log'), 'packaged worker smoke\n')
-  writeFileSync(join(crashDumpsDir, 'pending', 'packaged-smoke.dmp'), 'packaged crash dump smoke\n')
-  try {
-    const output = await launch(
-      join(unpackedRoot, 'lib', 'diagnostic-export-worker.js'),
-      { logsDir, userDataDir, appVersion: 'packaged-smoke', maxEvidenceBytes: 1024, crashDumpsDir },
-    )
-    if (!existsSync(output)) {
-      throw new Error(`dsh-plugin-desktop: packaged diagnostic worker produced no archive at ${output}`)
-    }
-    const crashEntry = 'crash-dumps/pending/packaged-smoke.dmp'
-    if (new AdmZip(output).getEntry(crashEntry) === null) {
-      throw new Error(`dsh-plugin-desktop: packaged diagnostic worker omitted ${crashEntry}`)
-    }
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
-}
 
 /** Resolve the packaged Electron executable created beside the application resources. */
 export function resolvePackagedExecutablePath(context: PackagedRuntimeContext): string {
@@ -274,7 +246,9 @@ export function resolvePackagedExecutablePath(context: PackagedRuntimeContext): 
     return join(context.appOutDir, `${filename}.app`, 'Contents', 'MacOS', filename)
   }
   if (context.electronPlatformName === 'win32') return join(context.appOutDir, `${filename}.exe`)
-  if (context.electronPlatformName === 'linux') return join(context.appOutDir, filename)
+  if (context.electronPlatformName === 'linux') {
+    return join(context.appOutDir, context.packager.executableName ?? filename)
+  }
   throw new Error(
     `dsh-plugin-desktop: unsupported Electron afterPack platform ${JSON.stringify(context.electronPlatformName)}`,
   )
@@ -294,6 +268,7 @@ function runPackagedElectron(
   })
   return {
     ...(result.error === undefined ? {} : { error: result.error }),
+    signal: result.signal,
     status: result.status,
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
@@ -351,9 +326,15 @@ export function smokePackagedElectronRuntime(
       accepts: (stdout: string) => stdout.trim() === 'DSH_PACKAGED_RUNTIME_OK',
     },
     {
+      label: 'Desktop CLI config composition',
+      entry: join(asarRoot, 'lib', 'desktop-cli.js'),
+      args: ['--profile', 'headless', '--dump-config'],
+      accepts: (stdout: string) => stdout.includes('# == ') && stdout.includes('name:'),
+    },
+    {
       // This is deliberately the Desktop wrapper rather than DSH's bin.js:
       // a child RunAsNode process cannot inherit main's resolver hook.
-      label: 'Desktop CLI Profile boot',
+      label: 'Desktop CLI Loader boot',
       entry: join(asarRoot, 'lib', 'desktop-cli.js'),
       args: ['--profile', 'headless', '--help'],
       accepts: (stdout: string) => stdout.includes('dsh --profile headless'),
@@ -370,6 +351,7 @@ export function smokePackagedElectronRuntime(
       if (result.status !== 0 || !check.accepts(result.stdout)) {
         throw new Error(
           `dsh-plugin-desktop: packaged ${check.label} smoke failed with status ${String(result.status)}; `
+          + `signal=${String(result.signal ?? null)}; `
           + `stdout=${JSON.stringify(result.stdout.trim())}; stderr=${JSON.stringify(result.stderr.trim())}`,
         )
       }
@@ -417,24 +399,96 @@ export function resolvePackagedUnpackedRoot(context: PackagedRuntimeContext): st
   return `${resolvePackagedAsarPath(context)}.unpacked`
 }
 
-/** Normalize the host-specific separators emitted by the ASAR reader. */
+/** Normalize archive and physical-tree paths without allowing traversal aliases. */
 function normalizeArchiveEntry(entry: string): string {
-  return entry.replaceAll('\\', '/').replace(/^\/+/, '').replace(/\/+$/, '')
+  const segments = entry
+    .replaceAll('\\', '/')
+    .split('/')
+    .filter(segment => segment.length > 0 && segment !== '.')
+  if (segments.length === 0 || segments.includes('..')) {
+    throw new Error(`dsh-plugin-desktop: invalid packaged runtime path ${JSON.stringify(entry)}`)
+  }
+  return segments.join('/')
+}
+
+/** Recursively inventory every runtime file emitted by the desktop build. */
+export function listDesktopRuntimeEntries(libRoot: string): string[] {
+  const entries: string[] = []
+  const pending: Array<{ absolute: string; archive: string }> = [{
+    absolute: libRoot,
+    archive: 'lib',
+  }]
+  for (let directory = pending.pop(); directory !== undefined; directory = pending.pop()) {
+    for (const entry of readdirSync(directory.absolute, { withFileTypes: true })) {
+      const absolute = join(directory.absolute, entry.name)
+      const archive = normalizeArchiveEntry(`${directory.archive}/${entry.name}`)
+      if (entry.isDirectory()) pending.push({ absolute, archive })
+      else if (!entry.name.endsWith('.map') && !/\.d\.(?:cts|mts|ts)$/u.test(entry.name)) {
+        entries.push(archive)
+      }
+    }
+  }
+  return entries.sort((left, right) => left.localeCompare(right, 'en'))
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Derive canonical file and unpacked-file sets directly from the ASAR header. */
+export function indexPackagedAsarHeader(header: unknown): PackagedAsarIndex {
+  const files = new Set<string>()
+  const unpackedFiles = new Set<string>()
+  const visit = (
+    value: unknown,
+    path: string | undefined,
+    parentUnpacked: boolean,
+  ): void => {
+    if (!record(value)) {
+      throw new Error(`dsh-plugin-desktop: malformed ASAR header entry at ${path ?? '(root)'}`)
+    }
+    if ('unpacked' in value && typeof value.unpacked !== 'boolean') {
+      throw new Error(`dsh-plugin-desktop: malformed ASAR unpacked flag at ${path ?? '(root)'}`)
+    }
+    const unpacked = parentUnpacked || value.unpacked === true
+    if ('files' in value) {
+      if (!record(value.files) || 'link' in value || 'size' in value) {
+        throw new Error(`dsh-plugin-desktop: malformed ASAR directory entry at ${path ?? '(root)'}`)
+      }
+      for (const [name, child] of Object.entries(value.files)) {
+        const childPath = normalizeArchiveEntry(path === undefined ? name : `${path}/${name}`)
+        visit(child, childPath, unpacked)
+      }
+      return
+    }
+    if (path === undefined || (!('size' in value) && !('link' in value))) {
+      throw new Error(`dsh-plugin-desktop: malformed ASAR leaf entry at ${path ?? '(root)'}`)
+    }
+    if (files.has(path)) {
+      throw new Error(`dsh-plugin-desktop: duplicate normalized ASAR header entry ${path}`)
+    }
+    files.add(path)
+    if (unpacked) unpackedFiles.add(path)
+  }
+  visit(header, undefined, false)
+  return { files, unpackedFiles }
 }
 
 /**
  * Inspect one archive and reject an incomplete packaged runtime.
  * @param archivePath - resolved app.asar path.
- * @param list - ASAR listing implementation.
- * @returns The normalized archive entry set for physical mirror verification.
+ * @param requiredEntries - build-derived and stable runtime leaves that must be present.
+ * @param readHeader - raw ASAR header reader.
+ * @returns Canonical file sets for physical-tree verification.
  */
 export function verifyPackagedAsar(
   archivePath: string,
-  list: ArchiveLister = listPackage,
-): ReadonlySet<string> {
-  let entries: readonly string[]
+  requiredEntries: readonly string[],
+  readHeader: ArchiveHeaderReader = getRawHeader,
+): PackagedAsarIndex {
+  let rawHeader: RawAsarHeader
   try {
-    entries = list(archivePath, { isPack: false })
+    rawHeader = readHeader(archivePath)
   } catch (cause) {
     throw new Error(
       `dsh-plugin-desktop: failed to inspect packaged runtime at ${archivePath}`,
@@ -442,85 +496,236 @@ export function verifyPackagedAsar(
     )
   }
 
-  const present = new Set(entries.map(normalizeArchiveEntry))
-  const missing = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !present.has(entry))
+  const index = indexPackagedAsarHeader(rawHeader.header)
+  const missing = requiredEntries
+    .map(normalizeArchiveEntry)
+    .filter(entry => !index.files.has(entry))
   if (missing.length > 0) {
     throw new Error(
       `dsh-plugin-desktop: packaged runtime at ${archivePath} is missing required ASAR entries: ${missing.join(', ')}`,
     )
   }
-  return present
+  return index
 }
 
-/** Enumerate physical files without following links outside the unpacked tree. */
-export function listUnpackedRuntimeFiles(unpackedRoot: string): string[] {
-  const files: string[] = []
+/** Enumerate physical file/symlink leaves and byte sizes without following links. */
+export function listUnpackedRuntimeFiles(unpackedRoot: string): UnpackedRuntimeFile[] {
+  const files: UnpackedRuntimeFile[] = []
   const pending = ['']
   for (let directory = pending.pop(); directory !== undefined; directory = pending.pop()) {
     for (const entry of readdirSync(join(unpackedRoot, directory), { withFileTypes: true })) {
       const path = join(directory, entry.name)
       if (entry.isDirectory()) pending.push(path)
-      else files.push(path.replaceAll('\\', '/'))
+      else files.push({
+        path: path.replaceAll('\\', '/'),
+        bytes: lstatSync(join(unpackedRoot, path)).size,
+      })
     }
   }
-  return files.sort()
+  return files.sort((left, right) => left.path.localeCompare(right.path, 'en'))
+}
+
+function unpackedPackageRoot(path: string): string | undefined {
+  const segments = path.split('/')
+  if (segments[0] !== 'node_modules' || segments.length < 2) return undefined
+  if (segments[1]?.startsWith('@') === true) {
+    return segments.length >= 3 ? segments.slice(0, 3).join('/') : undefined
+  }
+  return segments.slice(0, 2).join('/')
+}
+
+function unpackedGroupRoot(path: string): string {
+  return unpackedPackageRoot(path) ?? `desktop/${path.split('/')[0] ?? '(root)'}`
+}
+
+function allowedSmartUnpackPackageRoot(root: string): boolean {
+  return ALLOWED_SMART_UNPACK_PACKAGE_ROOTS.some(candidate => root === candidate)
+    || ALLOWED_SMART_UNPACK_PACKAGE_PREFIXES.some(prefix => root.startsWith(prefix))
+}
+
+/** Summarize smart-unpacked payload by package root for actionable build output. */
+export function summarizeUnpackedRuntime(
+  files: readonly UnpackedRuntimeFile[],
+): UnpackedRuntimeSummary {
+  const groups = new Map<string, { files: number; bytes: number }>()
+  let bytes = 0
+  for (const file of files) {
+    if (!Number.isSafeInteger(file.bytes) || file.bytes < 0) {
+      throw new Error(
+        `dsh-plugin-desktop: unpacked runtime entry ${JSON.stringify(file.path)} has invalid byte size ${String(file.bytes)}`,
+      )
+    }
+    bytes += file.bytes
+    const root = unpackedGroupRoot(normalizeArchiveEntry(file.path))
+    const group = groups.get(root) ?? { files: 0, bytes: 0 }
+    group.files += 1
+    group.bytes += file.bytes
+    groups.set(root, group)
+  }
+  return {
+    files: files.length,
+    bytes,
+    groups: [...groups]
+      .map(([root, group]) => ({ root, ...group }))
+      .sort((left, right) => right.bytes - left.bytes || left.root.localeCompare(right.root, 'en')),
+  }
+}
+
+/** Render a stable one-line inventory suitable for Electron Builder logs and failures. */
+export function formatUnpackedRuntimeSummary(summary: UnpackedRuntimeSummary): string {
+  const groups = summary.groups
+    .map(group => `${group.root}=${String(group.files)} files/${String(group.bytes)} bytes`)
+    .join(', ')
+  return `${String(summary.files)} files/${String(summary.bytes)} bytes${groups.length === 0 ? '' : `; ${groups}`}`
 }
 
 /**
- * Reject a regression back to the old full app.asar mirror. Every physical
- * file must still be declared by the ASAR header, ordinary JS sentinels must
- * remain archived, and Electron Builder's smart-unpacked native surface stays
- * under a hard file-count budget.
+ * Reject a regression back to the old full app.asar mirror. Header unpacked
+ * leaves and physical file/symlink leaves must match exactly before the native
+ * allowlist and payload budgets are applied.
  */
 export function verifySelectiveUnpackedRuntime(
-  archiveEntries: ReadonlySet<string>,
+  archive: PackagedAsarIndex,
   unpackedRoot: string,
-  files: readonly string[],
-  exists: FileProbe = existsSync,
-): void {
-  const normalizedFiles = files.map(normalizeArchiveEntry)
-  const outsideArchive = normalizedFiles.filter(entry => !archiveEntries.has(entry))
-  if (outsideArchive.length > 0) {
+  files: readonly UnpackedRuntimeFile[],
+  allowedDesktopEntries: readonly string[] = REQUIRED_UNPACKED_RUNTIME_ENTRIES,
+): UnpackedRuntimeSummary {
+  const normalizedFiles = files.map(file => ({
+    path: normalizeArchiveEntry(file.path),
+    bytes: file.bytes,
+  }))
+  const seen = new Set<string>()
+  const duplicates = new Set<string>()
+  for (const file of normalizedFiles) {
+    if (seen.has(file.path)) duplicates.add(file.path)
+    seen.add(file.path)
+  }
+  if (duplicates.size > 0) {
     throw new Error(
-      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains entries outside app.asar: ${outsideArchive.join(', ')}`,
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains duplicate normalized physical entries: ${[...duplicates].sort().join(', ')}`,
+    )
+  }
+  const summary = summarizeUnpackedRuntime(normalizedFiles)
+  const inventory = formatUnpackedRuntimeSummary(summary)
+  const outsideArchive = normalizedFiles
+    .map(file => file.path)
+    .filter(entry => !archive.files.has(entry))
+    .sort()
+  const packedInHeader = normalizedFiles
+    .map(file => file.path)
+    .filter(entry => archive.files.has(entry) && !archive.unpackedFiles.has(entry))
+    .sort()
+  const missingPhysical = [...archive.unpackedFiles]
+    .filter(entry => !seen.has(entry))
+    .sort()
+  const mismatches = [
+    ...(outsideArchive.length === 0
+      ? []
+      : [`physical entries absent from the ASAR header: ${outsideArchive.join(', ')}`]),
+    ...(packedInHeader.length === 0
+      ? []
+      : [`physical entries not marked unpacked in the ASAR header: ${packedInHeader.join(', ')}`]),
+    ...(missingPhysical.length === 0
+      ? []
+      : [`ASAR header entries missing from the physical tree: ${missingPhysical.join(', ')}`]),
+  ]
+  if (mismatches.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} does not exactly match ASAR unpacked flags: ${mismatches.join('; ')}; inventory: ${inventory}`,
+    )
+  }
+  const desktopCode = normalizedFiles
+    .map(file => file.path)
+    .filter(entry => /^lib\/.+\.(?:cjs|html|js|json|mjs)$/u.test(entry))
+  if (desktopCode.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains desktop code/data that must stay in app.asar: ${desktopCode.join(', ')}; inventory: ${inventory}`,
     )
   }
   const forbidden = FORBIDDEN_UNPACKED_RUNTIME_ENTRIES
-    .filter(entry => exists(join(unpackedRoot, entry)))
+    .filter(entry => seen.has(entry))
   if (forbidden.length > 0) {
     throw new Error(
-      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} mirrors ordinary archived modules: ${forbidden.join(', ')}`,
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} mirrors ordinary archived modules: ${forbidden.join(', ')}; inventory: ${inventory}`,
     )
   }
-  if (normalizedFiles.length > MAX_UNPACKED_RUNTIME_FILES) {
+  const allowedDesktop = new Set(allowedDesktopEntries.map(normalizeArchiveEntry))
+  const unexpectedDesktopEntries = normalizedFiles
+    .map(file => file.path)
+    .filter(entry => unpackedPackageRoot(entry) === undefined && !allowedDesktop.has(entry))
+    .sort()
+  if (unexpectedDesktopEntries.length > 0) {
     throw new Error(
-      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains ${String(normalizedFiles.length)} files; `
-      + `selective ASAR budget is ${String(MAX_UNPACKED_RUNTIME_FILES)}`,
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains non-allowlisted desktop entries: ${unexpectedDesktopEntries.join(', ')}; inventory: ${inventory}`,
     )
   }
+  const unexpectedPackageRoots = [...new Set(normalizedFiles.flatMap((file) => {
+    const root = unpackedPackageRoot(file.path)
+    return root === undefined || allowedSmartUnpackPackageRoot(root) ? [] : [root]
+  }))].sort()
+  if (unexpectedPackageRoots.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains non-allowlisted package roots: ${unexpectedPackageRoots.join(', ')}; inventory: ${inventory}`,
+    )
+  }
+  if (summary.files > MAX_UNPACKED_RUNTIME_FILES) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} exceeds selective ASAR file budget ${String(MAX_UNPACKED_RUNTIME_FILES)}; inventory: ${inventory}`,
+    )
+  }
+  if (summary.bytes > MAX_UNPACKED_RUNTIME_BYTES) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} exceeds selective ASAR byte budget ${String(MAX_UNPACKED_RUNTIME_BYTES)}; inventory: ${inventory}`,
+    )
+  }
+  return summary
 }
 
 /**
  * Verify Electron Builder's completed application before signing begins.
  * @param context - Electron Builder's afterPack context.
- * @param list - ASAR listing implementation.
+ * @param readHeader - raw ASAR header reader.
  * @param exists - physical-file probe for the unpacked CLI dependency tree.
  * @param listUnpacked - physical file inventory below app.asar.unpacked.
- * @returns Nothing; failure rejects the package before signing.
+ * @param listDesktop - recursive inventory of the completed desktop lib/ output.
+ * @returns Physical payload inventory; failure rejects the package before signing.
  */
 export function verifyPackagedRuntime(
   context: PackagedRuntimeContext,
-  list: ArchiveLister = listPackage,
+  readHeader: ArchiveHeaderReader = getRawHeader,
   exists: FileProbe = existsSync,
   listUnpacked: UnpackedFileLister = listUnpackedRuntimeFiles,
-): void {
-  const archiveEntries = verifyPackagedAsar(resolvePackagedAsarPath(context), list)
+  listDesktop: DesktopRuntimeLister = listDesktopRuntimeEntries,
+): UnpackedRuntimeSummary {
+  const libRoot = join(context.packager.projectDir ?? DESKTOP_PACKAGE_ROOT, 'lib')
+  let desktopRuntimeEntries: readonly string[]
+  try {
+    desktopRuntimeEntries = listDesktop(libRoot)
+  } catch (cause) {
+    throw new Error(
+      `dsh-plugin-desktop: failed to inventory desktop build output at ${libRoot}`,
+      { cause },
+    )
+  }
+  const archive = verifyPackagedAsar(
+    resolvePackagedAsarPath(context),
+    [...REQUIRED_PACKAGED_RUNTIME_ENTRIES, ...desktopRuntimeEntries],
+    readHeader,
+  )
   const unpackedRoot = resolvePackagedUnpackedRoot(context)
+  if (context.electronPlatformName === 'win32' && context.arch !== undefined && context.arch !== 1) {
+    throw new Error(
+      `dsh-plugin-desktop: unsupported Windows package architecture ${String(context.arch)}; only x64 is configured`,
+    )
+  }
+  const desktopPhysicalEntries = context.electronPlatformName === 'darwin'
+    ? REQUIRED_MACOS_UNPACKED_RUNTIME_ENTRIES
+    : REQUIRED_NON_MACOS_UNPACKED_RUNTIME_ENTRIES
   const requiredPhysicalEntries = context.electronPlatformName === 'win32'
-    ? [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES]
+    ? [...desktopPhysicalEntries, ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES]
     : context.electronPlatformName === 'darwin' && context.arch === 4
-      ? [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...REQUIRED_MACOS_UNIVERSAL_ENTRIES]
-      : REQUIRED_UNPACKED_RUNTIME_ENTRIES
+      ? [...desktopPhysicalEntries, ...REQUIRED_MACOS_UNIVERSAL_ENTRIES]
+      : desktopPhysicalEntries
   const missing = requiredPhysicalEntries.filter(entry => !exists(join(unpackedRoot, entry)))
   if (missing.length > 0) {
     throw new Error(
@@ -536,7 +741,17 @@ export function verifyPackagedRuntime(
       )
     }
   }
-  verifySelectiveUnpackedRuntime(archiveEntries, unpackedRoot, listUnpacked(unpackedRoot), exists)
+  return verifySelectiveUnpackedRuntime(
+    archive,
+    unpackedRoot,
+    listUnpacked(unpackedRoot),
+    desktopPhysicalEntries,
+  )
+}
+
+/** Emit one compact package-root inventory after the static ASAR check passes. */
+export function reportUnpackedRuntime(summary: UnpackedRuntimeSummary): void {
+  process.stdout.write(`dsh-plugin-desktop: selective ASAR unpacked inventory: ${formatUnpackedRuntimeSummary(summary)}\n`)
 }
 
 /**
@@ -547,12 +762,10 @@ export function verifyPackagedRuntime(
 export async function afterPack(
   context: PackagedRuntimeContext,
   verify: typeof verifyPackagedRuntime = verifyPackagedRuntime,
-  smoke: PackagedDiagnosticWorkerSmoke = smokePackagedDiagnosticWorker,
-  electronSmoke: PackagedElectronSmoke = smokePackagedElectronRuntime,
+  report: (summary: UnpackedRuntimeSummary) => void = reportUnpackedRuntime,
 ): Promise<void> {
-  verify(context)
-  await smoke(resolvePackagedUnpackedRoot(context))
-  electronSmoke(context)
+  const summary = verify(context)
+  report(summary)
 }
 
 export default afterPack

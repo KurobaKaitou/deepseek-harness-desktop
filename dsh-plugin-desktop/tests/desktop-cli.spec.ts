@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import {
   clearElectronRunAsNode,
+  desktopCliProfileManifestUrl,
   runDesktopDshCli,
   selectedDesktopCliProfile,
   withDefaultDesktopProfile,
@@ -112,6 +113,19 @@ describe('packaged dsh bootstrap', () => {
     expect(selectedDesktopCliProfile(['plugin', '--profile=work', 'update'])).toBe('work')
     expect(selectedDesktopCliProfile(['web', '--help'])).toBe('web')
     expect(selectedDesktopCliProfile(['--version'])).toBeUndefined()
+  })
+
+  it('resolves CLI Profiles through DSH_HOME without allowing path traversal', () => {
+    const home = join(tmpdir(), 'dsh cli profile home')
+    expect(desktopCliProfileManifestUrl('工作 profile', { DSH_HOME: home })).toBe(
+      pathToFileURL(join(home, 'profiles', '工作 profile', 'package.json')).href,
+    )
+    expect(() => desktopCliProfileManifestUrl('../outside', { DSH_HOME: home }))
+      .toThrow('invalid profile name')
+    expect(() => desktopCliProfileManifestUrl('nested/profile', { DSH_HOME: home }))
+      .toThrow('invalid profile name')
+    expect(() => desktopCliProfileManifestUrl('node_modules', { DSH_HOME: home }))
+      .toThrow('invalid profile name')
   })
 
   it('uses the physical unpacked dependency tree only inside an Electron package', () => {
