@@ -102,6 +102,12 @@ export const REQUIRED_DSH_CLI_RUNTIME_ENTRIES = Object.freeze(
     .sort(),
 )
 
+/** PTC preset inputs copied by the legacy `code` Session compatibility path. */
+export const REQUIRED_AGENT_PRESET_RUNTIME_ENTRIES = [
+  'node_modules/@deepseek-ai/dsh-agent-presets/presets/ptc/agent.cordis.yml',
+  'node_modules/@deepseek-ai/dsh-agent-presets/presets/ptc/preset.yml',
+] as const
+
 /** AfterPack fields consumed without importing Electron Builder's incomplete declaration graph. */
 export interface PackagedRuntimeContext {
   /** Completed platform application directory. */
@@ -130,6 +136,7 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+  ...REQUIRED_AGENT_PRESET_RUNTIME_ENTRIES,
   'node_modules/open/index.js',
   'node_modules/pnpm/bin/pnpm.mjs',
 ] as const
@@ -164,6 +171,8 @@ export const FORBIDDEN_UNPACKED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
   'node_modules/@deepseek-ai/dsh-base/lib/index.js',
   'node_modules/@deepseek-ai/dsh-web-app/lib/index.js',
+  // Preset inputs are ordinary read-only data covered by ASAR integrity.
+  ...REQUIRED_AGENT_PRESET_RUNTIME_ENTRIES,
   'node_modules/@vscode/ripgrep/lib/index.js',
   'node_modules/open/index.js',
   'node_modules/yaml/dist/index.js',

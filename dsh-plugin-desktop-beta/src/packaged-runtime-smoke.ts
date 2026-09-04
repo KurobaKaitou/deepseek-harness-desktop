@@ -5,15 +5,17 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { rgPath } from '@vscode/ripgrep'
 import AdmZip from 'adm-zip'
+import { materializeLegacyPresetAliases } from './agent-preset-compat.ts'
 import { exportDiagnosticsZip } from './diagnostic-export.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
 
@@ -44,6 +46,30 @@ if (process.platform === 'win32') {
 } else {
   const fsExt = createRequire(installAnchor)('fs-ext') as { flockSync?: unknown }
   assert(typeof fsExt.flockSync === 'function', 'did not load the Electron ABI fs-ext binding')
+}
+
+/** Exercise the code-to-ptc compatibility copy through Electron's ASAR filesystem. */
+function smokeLegacyPresetAliases(): void {
+  const compatRoot = mkdtempSync(join(tmpdir(), 'dsh-packaged-preset-compat-'))
+  const installRequire = createRequire(installAnchor)
+  const shippedRoot = join(
+    dirname(installRequire.resolve('@deepseek-ai/dsh-agent-presets/package.json')),
+    'presets',
+  )
+  try {
+    assert(
+      materializeLegacyPresetAliases({ shippedRoot, compatRoot }) === compatRoot,
+      'did not materialize the legacy code preset alias',
+    )
+    const legacyComposition = readFileSync(join(compatRoot, 'code', 'agent.cordis.yml'), 'utf8')
+    const shippedComposition = readFileSync(join(shippedRoot, 'ptc', 'agent.cordis.yml'), 'utf8')
+    assert(
+      legacyComposition === shippedComposition,
+      'materialized code preset does not match the shipped ptc composition',
+    )
+  } finally {
+    rmSync(compatRoot, { recursive: true, force: true })
+  }
 }
 
 /** Exercise the production Worker entry through Electron's logical ASAR path. */
@@ -185,6 +211,7 @@ try {
   rmSync(root, { recursive: true, force: true })
 }
 
+smokeLegacyPresetAliases()
 await smokeDiagnosticExportWorker()
 
 process.stdout.write(OK_MARKER)

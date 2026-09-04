@@ -49,6 +49,21 @@ describe('legacy agent preset aliases', () => {
       .toBe(readFileSync(join(shippedPresetRoot(), 'ptc', 'agent.cordis.yml'), 'utf8'))
   })
 
+  it('copies nested assets from a shipped preset', () => {
+    const root = temporaryRoot()
+    const shippedRoot = join(root, 'presets')
+    const compatRoot = join(root, COMPAT_PRESET_DIRNAME)
+    const ptcRoot = join(shippedRoot, 'ptc')
+    const skill = join('skills', 'nested-skill', 'SKILL.md')
+    mkdirSync(join(ptcRoot, 'skills', 'nested-skill'), { recursive: true })
+    writeFileSync(join(ptcRoot, 'agent.cordis.yml'), '[]\n')
+    writeFileSync(join(ptcRoot, 'preset.yml'), 'name: PTC\n')
+    writeFileSync(join(ptcRoot, skill), '# Nested skill\n')
+
+    expect(materializeLegacyPresetAliases({ shippedRoot, compatRoot })).toBe(compatRoot)
+    expect(readFileSync(join(compatRoot, 'code', skill), 'utf8')).toBe('# Nested skill\n')
+  })
+
   it('materializes nothing when the shipped root supplies the legacy id itself', () => {
     const shippedRoot = join(temporaryRoot(), 'presets')
     const compatRoot = join(temporaryRoot(), COMPAT_PRESET_DIRNAME)

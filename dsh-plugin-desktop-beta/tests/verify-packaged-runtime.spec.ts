@@ -21,6 +21,7 @@ import {
   MAX_PNPM_SMART_UNPACK_FILES,
   MAX_UNPACKED_RUNTIME_BYTES,
   MAX_UNPACKED_RUNTIME_FILES,
+  REQUIRED_AGENT_PRESET_RUNTIME_ENTRIES,
   REQUIRED_DSH_CLI_RUNTIME_ENTRIES,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNPACKED_RUNTIME_ENTRIES,
@@ -206,6 +207,17 @@ describe('packaged desktop runtime verification', () => {
     expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => entry.startsWith('lib/'))).toBe(false)
     expect(DESKTOP_RUNTIME_ENTRIES).toContain('lib/main.js')
     expect(DESKTOP_RUNTIME_ENTRIES).toContain('lib/native-ui/setup-wizard.html')
+  })
+
+  it('keeps the PTC compatibility source present and integrity-protected in app.asar', () => {
+    expect(REQUIRED_AGENT_PRESET_RUNTIME_ENTRIES).toEqual([
+      'node_modules/@deepseek-ai/dsh-agent-presets/presets/ptc/agent.cordis.yml',
+      'node_modules/@deepseek-ai/dsh-agent-presets/presets/ptc/preset.yml',
+    ])
+    for (const entry of REQUIRED_AGENT_PRESET_RUNTIME_ENTRIES) {
+      expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES).toContain(entry)
+      expect(FORBIDDEN_UNPACKED_RUNTIME_ENTRIES).toContain(entry)
+    }
   })
 
   it('recursively derives every non-map desktop runtime file from the completed build', () => {
@@ -611,6 +623,7 @@ describe('packaged desktop runtime verification', () => {
     'lib/packaged-runtime-smoke.js',
     'lib/pnpm.js',
     'lib/update-download.js',
+    ...REQUIRED_AGENT_PRESET_RUNTIME_ENTRIES,
     'node_modules/open/index.js',
   ])('fails loud when required ASAR entry %s is absent', (missing) => {
     const runtimeContext = context('/build', 'win32')
