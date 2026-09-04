@@ -1,9 +1,18 @@
 /** Fail-loud verification of the runtime entries sealed into Electron's app.asar. */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
@@ -13,6 +22,17 @@ import {
 } from './mac-universal.ts'
 
 const DSH_PACKAGE_ROOT = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json'))
+const PNPM_PACKAGE_ROOT = dirname(createRequire(import.meta.url).resolve('pnpm/package.json'))
+
+function packageVersion(packageRoot: string): string {
+  return (JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as { version: string }).version
+}
+
+const DSH_RUNTIME_VERSION = packageVersion(DSH_PACKAGE_ROOT)
+const PNPM_RUNTIME_VERSION = packageVersion(PNPM_PACKAGE_ROOT)
+
+/** Maximum physical file count accepted beside ASAR after smart unpack. */
+export const MAX_UNPACKED_RUNTIME_FILES = 1_500
 
 /** Every generated JavaScript file shipped by the installed DSH CLI package. */
 export const REQUIRED_DSH_CLI_RUNTIME_ENTRIES = Object.freeze(
@@ -53,6 +73,7 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'lib/profiles.js',
   'lib/diagnostics.js',
   'lib/diagnostic-export-worker.js',
+  'lib/packaged-runtime-smoke.js',
   'lib/desktop-cli.js',
   'lib/desktop-runtime-environment.js',
   'lib/desktop-terminal.js',
@@ -69,10 +90,8 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/pnpm/bin/pnpm.mjs',
 ] as const
 
-/** Physical entries required because profile fallback symlinks cannot target ASAR paths. */
+/** Small desktop-owned surface intentionally kept physical beside app.asar. */
 export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
-  'package.json',
-  'cordis.patch.yml',
   'build/app-icon.png',
   'build/app-icon-mac.png',
   'build/tray-iconTemplate.png',
@@ -90,25 +109,30 @@ export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   'lib/profiles.js',
   'lib/diagnostics.js',
   'lib/diagnostic-export-worker.js',
+  'lib/packaged-runtime-smoke.js',
   'lib/terminal.js',
   'lib/update-download.js',
   'lib/updates.js',
   'lib/windows-pwsh-sandbox.js',
-  'node_modules/@deepseek-ai/dsh/package.json',
-  'node_modules/@deepseek-ai/dsh-agent-presets/package.json',
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/agent.cordis.yml',
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/editing-cordis-compositions/SKILL.md',
-  ...REQUIRED_DSH_CLI_RUNTIME_ENTRIES,
-  'node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js',
+] as const
+
+/** Ordinary modules that must stay archived to prevent a full physical mirror regression. */
+export const FORBIDDEN_UNPACKED_RUNTIME_ENTRIES = [
+  'package.json',
+  'cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh/lib/bin.js',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
-  'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
+  'node_modules/@deepseek-ai/dsh-base/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-web-app/lib/index.js',
+  'node_modules/@vscode/ripgrep/lib/index.js',
   'node_modules/open/index.js',
   'node_modules/pnpm/bin/pnpm.mjs',
+  'node_modules/yaml/dist/index.js',
 ] as const
 
 /** Prebuilt Node-API modules required when the Windows package skips native source rebuilds. */
 export const REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES = [
+  'node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe',
   'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
   'node_modules/node-pty/prebuilds/win32-x64/conpty_console_list.node',
   'node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe',
@@ -120,33 +144,14 @@ export const REQUIRED_MACOS_UNIVERSAL_ENTRIES = [
   ...MACOS_UNIVERSAL_NATIVE_ENTRIES.map(entry => entry.path),
 ] as const
 
-/** Package exports that profile fallback links must resolve from the physical application tree. */
-export const REQUIRED_UNPACKED_PACKAGE_SPECIFIERS = [
-  'dsh-plugin-desktop',
-  'dsh-plugin-desktop/profile',
-  'dsh-plugin-desktop/client',
-  'dsh-plugin-desktop/terminal',
-  'dsh-plugin-desktop/pnpm',
-  'dsh-plugin-desktop/profile-service',
-  'dsh-plugin-desktop/profiles',
-  'dsh-plugin-desktop/diagnostics',
-  'dsh-plugin-desktop/notifications',
-  'dsh-plugin-desktop/updates',
-  'dsh-plugin-desktop/windows-pwsh-sandbox',
-  'dsh-plugin-desktop/package.json',
-  '@deepseek-ai/dsh-base/package.json',
-  '@deepseek-ai/schemastery/package.json',
-  '@deepseek-ai/dsh-web-app/package.json',
-] as const
-
 /** Injectable archive listing seam used by focused tests. */
 export type ArchiveLister = (archivePath: string, options: { isPack: boolean }) => readonly string[]
 
 /** Injectable physical-file probe used by focused tests. */
 export type FileProbe = (filename: string) => boolean
 
-/** Injectable Node package resolver used by focused tests. */
-export type PackageResolver = (specifier: string) => string
+/** Injectable physical unpacked-file inventory used by focused tests. */
+export type UnpackedFileLister = (unpackedRoot: string) => readonly string[]
 
 /** Inputs understood by the bundled diagnostics Worker. */
 export interface PackagedDiagnosticWorkerData {
@@ -165,6 +170,24 @@ export type PackagedDiagnosticWorkerLauncher = (
 
 /** Injectable smoke seam used to verify afterPack ordering. */
 export type PackagedDiagnosticWorkerSmoke = (unpackedRoot: string) => Promise<void>
+
+/** Result surface required from one packaged Electron child. */
+export interface PackagedElectronResult {
+  readonly error?: Error
+  readonly status: number | null
+  readonly stdout: string
+  readonly stderr: string
+}
+
+/** Injectable packaged Electron process seam used by focused tests. */
+export type PackagedElectronRunner = (
+  executable: string,
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv,
+) => PackagedElectronResult
+
+/** Injectable ASAR/CLI/native smoke seam used to verify afterPack ordering. */
+export type PackagedElectronSmoke = (context: PackagedRuntimeContext) => void
 
 /** Result posted by the bundled diagnostics Worker. */
 type PackagedDiagnosticWorkerResult =
@@ -244,6 +267,124 @@ export async function smokePackagedDiagnosticWorker(
   }
 }
 
+/** Resolve the packaged Electron executable created beside the application resources. */
+export function resolvePackagedExecutablePath(context: PackagedRuntimeContext): string {
+  const filename = context.packager.appInfo.productFilename
+  if (context.electronPlatformName === 'darwin') {
+    return join(context.appOutDir, `${filename}.app`, 'Contents', 'MacOS', filename)
+  }
+  if (context.electronPlatformName === 'win32') return join(context.appOutDir, `${filename}.exe`)
+  if (context.electronPlatformName === 'linux') return join(context.appOutDir, filename)
+  throw new Error(
+    `dsh-plugin-desktop: unsupported Electron afterPack platform ${JSON.stringify(context.electronPlatformName)}`,
+  )
+}
+
+function runPackagedElectron(
+  executable: string,
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv,
+): PackagedElectronResult {
+  const result = spawnSync(executable, args, {
+    encoding: 'utf8',
+    env: environment,
+    shell: false,
+    timeout: 60_000,
+    windowsHide: true,
+  })
+  return {
+    ...(result.error === undefined ? {} : { error: result.error }),
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  }
+}
+
+function packagedRuntimeRunnable(context: PackagedRuntimeContext): boolean {
+  if (context.electronPlatformName !== process.platform) return false
+  const { arch } = context
+  if (arch === undefined || arch === 4) return true
+  if (arch === 1) return process.arch === 'x64'
+  if (arch === 3) return process.arch === 'arm64'
+  if (arch === 0) return process.arch === 'ia32'
+  return false
+}
+
+/**
+ * Execute the real packaged runtime through Electron's supported RunAsNode
+ * path. This proves DSH and pnpm can load from logical ASAR paths, the upstream
+ * Profile proxy selects Electron, and smartUnpack exposes the ripgrep binary.
+ */
+export function smokePackagedElectronRuntime(
+  context: PackagedRuntimeContext,
+  run: PackagedElectronRunner = runPackagedElectron,
+): void {
+  // A universal executable runs natively on either macOS CPU. Per-architecture
+  // intermediate apps are only executable on the matching packaging host.
+  if (!packagedRuntimeRunnable(context)) return
+  const executable = resolvePackagedExecutablePath(context)
+  const asarRoot = resolvePackagedAsarPath(context)
+  const smokeHome = mkdtempSync(join(tmpdir(), 'dsh-packaged-cli-'))
+  const environment = {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: '1',
+    DSH_HOME: smokeHome,
+    DSH_TELEMETRY_DISABLED: '1',
+  }
+  const checks = [
+    {
+      label: 'DSH CLI',
+      entry: join(asarRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      args: ['--version'],
+      accepts: (stdout: string) => stdout.trim() === DSH_RUNTIME_VERSION,
+    },
+    {
+      label: 'pnpm CLI',
+      entry: join(asarRoot, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'),
+      args: ['--version'],
+      accepts: (stdout: string) => stdout.trim() === PNPM_RUNTIME_VERSION,
+    },
+    {
+      label: 'ASAR/Profile/CJS/ripgrep',
+      entry: join(asarRoot, 'lib', 'packaged-runtime-smoke.js'),
+      args: [],
+      accepts: (stdout: string) => stdout.trim() === 'DSH_PACKAGED_RUNTIME_OK',
+    },
+    {
+      // This is deliberately the Desktop wrapper rather than DSH's bin.js:
+      // a child RunAsNode process cannot inherit main's resolver hook.
+      label: 'Desktop CLI Profile boot',
+      entry: join(asarRoot, 'lib', 'desktop-cli.js'),
+      args: ['--profile', 'headless', '--help'],
+      accepts: (stdout: string) => stdout.includes('dsh --profile headless'),
+    },
+  ] as const
+  try {
+    for (const check of checks) {
+      const result = run(executable, ['--expose-internals', check.entry, ...check.args], environment)
+      if (result.error !== undefined) {
+        throw new Error(`dsh-plugin-desktop: packaged ${check.label} smoke could not start`, {
+          cause: result.error,
+        })
+      }
+      if (result.status !== 0 || !check.accepts(result.stdout)) {
+        throw new Error(
+          `dsh-plugin-desktop: packaged ${check.label} smoke failed with status ${String(result.status)}; `
+          + `stdout=${JSON.stringify(result.stdout.trim())}; stderr=${JSON.stringify(result.stderr.trim())}`,
+        )
+      }
+    }
+    const obsoleteFallback = join(smokeHome, 'profiles', 'node_modules')
+    if (existsSync(obsoleteFallback) && readdirSync(obsoleteFallback).length > 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged Desktop CLI recreated the obsolete shared Profile fallback at ${obsoleteFallback}`,
+      )
+    }
+  } finally {
+    rmSync(smokeHome, { recursive: true, force: true })
+  }
+}
+
 /**
  * Resolve the platform-specific archive produced by Electron Builder.
  * @param context - completed application directory and target platform.
@@ -311,61 +452,51 @@ export function verifyPackagedAsar(
   return present
 }
 
-/**
- * Require every ASAR header entry to have a physical counterpart.
- *
- * The Desktop packaging contract unpacks every included application file so
- * profile fallback links and Node ESM resolution never target virtual paths.
- * Checking the complete header closes the gap left by a curated entry list:
- * a collector regression cannot silently omit transitive packages such as
- * yaml, zod, or typebox from app.asar.unpacked.
- */
-export function verifyUnpackedArchiveMirror(
-  archiveEntries: ReadonlySet<string>,
-  unpackedRoot: string,
-  exists: FileProbe = existsSync,
-): void {
-  const missing = [...archiveEntries]
-    .filter(entry => entry.length > 0 && !exists(join(unpackedRoot, entry)))
-  if (missing.length > 0) {
-    throw new Error(
-      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} is missing ASAR-declared physical entries: ${missing.join(', ')}`,
-    )
+/** Enumerate physical files without following links outside the unpacked tree. */
+export function listUnpackedRuntimeFiles(unpackedRoot: string): string[] {
+  const files: string[] = []
+  const pending = ['']
+  for (let directory = pending.pop(); directory !== undefined; directory = pending.pop()) {
+    for (const entry of readdirSync(join(unpackedRoot, directory), { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) pending.push(path)
+      else files.push(path.replaceAll('\\', '/'))
+    }
   }
+  return files.sort()
 }
 
 /**
- * Verify package exports resolve through the physical tree instead of the build workspace.
- * @param unpackedRoot - absolute path to app.asar.unpacked.
- * @param resolvePackage - package resolver anchored at the physical root manifest.
- * @returns Nothing; failure rejects missing exports and paths outside app.asar.unpacked.
+ * Reject a regression back to the old full app.asar mirror. Every physical
+ * file must still be declared by the ASAR header, ordinary JS sentinels must
+ * remain archived, and Electron Builder's smart-unpacked native surface stays
+ * under a hard file-count budget.
  */
-export function verifyUnpackedPackageResolution(
+export function verifySelectiveUnpackedRuntime(
+  archiveEntries: ReadonlySet<string>,
   unpackedRoot: string,
-  resolvePackage: PackageResolver = createRequire(join(unpackedRoot, 'package.json')).resolve,
+  files: readonly string[],
+  exists: FileProbe = existsSync,
 ): void {
-  for (const specifier of REQUIRED_UNPACKED_PACKAGE_SPECIFIERS) {
-    let resolvedPath: string
-    try {
-      resolvedPath = resolvePackage(specifier)
-    } catch (cause) {
-      throw new Error(
-        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} cannot resolve required package export ${specifier}`,
-        { cause },
-      )
-    }
-
-    const relativePath = relative(unpackedRoot, resolvedPath)
-    if (
-      !isAbsolute(resolvedPath)
-      || relativePath === '..'
-      || relativePath.startsWith(`..${sep}`)
-      || isAbsolute(relativePath)
-    ) {
-      throw new Error(
-        `dsh-plugin-desktop: required package export ${specifier} resolved outside ${unpackedRoot}: ${resolvedPath}`,
-      )
-    }
+  const normalizedFiles = files.map(normalizeArchiveEntry)
+  const outsideArchive = normalizedFiles.filter(entry => !archiveEntries.has(entry))
+  if (outsideArchive.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains entries outside app.asar: ${outsideArchive.join(', ')}`,
+    )
+  }
+  const forbidden = FORBIDDEN_UNPACKED_RUNTIME_ENTRIES
+    .filter(entry => exists(join(unpackedRoot, entry)))
+  if (forbidden.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} mirrors ordinary archived modules: ${forbidden.join(', ')}`,
+    )
+  }
+  if (normalizedFiles.length > MAX_UNPACKED_RUNTIME_FILES) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains ${String(normalizedFiles.length)} files; `
+      + `selective ASAR budget is ${String(MAX_UNPACKED_RUNTIME_FILES)}`,
+    )
   }
 }
 
@@ -374,14 +505,14 @@ export function verifyUnpackedPackageResolution(
  * @param context - Electron Builder's afterPack context.
  * @param list - ASAR listing implementation.
  * @param exists - physical-file probe for the unpacked CLI dependency tree.
- * @param resolvePackage - package resolver anchored at the physical root manifest.
+ * @param listUnpacked - physical file inventory below app.asar.unpacked.
  * @returns Nothing; failure rejects the package before signing.
  */
 export function verifyPackagedRuntime(
   context: PackagedRuntimeContext,
   list: ArchiveLister = listPackage,
   exists: FileProbe = existsSync,
-  resolvePackage?: PackageResolver,
+  listUnpacked: UnpackedFileLister = listUnpackedRuntimeFiles,
 ): void {
   const archiveEntries = verifyPackagedAsar(resolvePackagedAsarPath(context), list)
   const unpackedRoot = resolvePackagedUnpackedRoot(context)
@@ -405,8 +536,7 @@ export function verifyPackagedRuntime(
       )
     }
   }
-  verifyUnpackedArchiveMirror(archiveEntries, unpackedRoot, exists)
-  verifyUnpackedPackageResolution(unpackedRoot, resolvePackage)
+  verifySelectiveUnpackedRuntime(archiveEntries, unpackedRoot, listUnpacked(unpackedRoot), exists)
 }
 
 /**
@@ -418,9 +548,11 @@ export async function afterPack(
   context: PackagedRuntimeContext,
   verify: typeof verifyPackagedRuntime = verifyPackagedRuntime,
   smoke: PackagedDiagnosticWorkerSmoke = smokePackagedDiagnosticWorker,
+  electronSmoke: PackagedElectronSmoke = smokePackagedElectronRuntime,
 ): Promise<void> {
   verify(context)
   await smoke(resolvePackagedUnpackedRoot(context))
+  electronSmoke(context)
 }
 
 export default afterPack

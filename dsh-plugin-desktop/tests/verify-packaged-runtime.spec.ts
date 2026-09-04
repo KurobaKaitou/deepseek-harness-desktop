@@ -1,23 +1,26 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import AdmZip from 'adm-zip'
 import {
   afterPack,
+  FORBIDDEN_UNPACKED_RUNTIME_ENTRIES,
+  MAX_UNPACKED_RUNTIME_FILES,
   REQUIRED_DSH_CLI_RUNTIME_ENTRIES,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
-  REQUIRED_UNPACKED_PACKAGE_SPECIFIERS,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
   REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
   resolvePackagedAsarPath,
+  resolvePackagedExecutablePath,
   resolvePackagedUnpackedRoot,
   smokePackagedDiagnosticWorker,
-  verifyUnpackedArchiveMirror,
+  smokePackagedElectronRuntime,
   verifyPackagedRuntime,
+  verifySelectiveUnpackedRuntime,
   type ArchiveLister,
   type FileProbe,
-  type PackageResolver,
+  type PackagedElectronRunner,
   type PackagedRuntimeContext,
   type PackagedDiagnosticWorkerLauncher,
 } from '../scripts/verify-packaged-runtime.ts'
@@ -37,11 +40,35 @@ function context(
 }
 
 function completeArchiveEntries(separator = '/'): string[] {
-  return REQUIRED_PACKAGED_RUNTIME_ENTRIES.map(entry => `${separator}${entry.replaceAll('/', separator)}`)
+  return [...new Set([
+    ...REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+    ...REQUIRED_UNPACKED_RUNTIME_ENTRIES,
+    ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
+    ...REQUIRED_MACOS_UNIVERSAL_ENTRIES,
+  ])].map(entry => `${separator}${entry.replaceAll('/', separator)}`)
 }
 
-function completePackageResolver(unpackedRoot: string): PackageResolver {
-  return specifier => join(unpackedRoot, 'resolved', `${specifier.replaceAll('/', '-')}.js`)
+function requiredPhysicalEntries(runtimeContext: PackagedRuntimeContext): string[] {
+  if (runtimeContext.electronPlatformName === 'win32') {
+    return [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES]
+  }
+  if (runtimeContext.electronPlatformName === 'darwin' && runtimeContext.arch === 4) {
+    return [...REQUIRED_UNPACKED_RUNTIME_ENTRIES, ...REQUIRED_MACOS_UNIVERSAL_ENTRIES]
+  }
+  return [...REQUIRED_UNPACKED_RUNTIME_ENTRIES]
+}
+
+function physicalFixture(
+  runtimeContext: PackagedRuntimeContext,
+  options: { missing?: string; extra?: readonly string[] } = {},
+): { exists: FileProbe; files: string[] } {
+  const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
+  const files = [...requiredPhysicalEntries(runtimeContext), ...(options.extra ?? [])]
+    .filter(entry => entry !== options.missing)
+  return {
+    files,
+    exists: filename => files.includes(relative(unpackedRoot, filename).replaceAll('\\', '/')),
+  }
 }
 
 describe('packaged desktop runtime verification', () => {
@@ -98,7 +125,7 @@ describe('packaged desktop runtime verification', () => {
     },
   )
 
-  it('runs the static package gate before the diagnostic Worker smoke', async () => {
+  it('runs static, physical Worker, and real Electron smokes in order', async () => {
     const runtimeContext = context('/build', 'win32')
     const calls: string[] = []
 
@@ -106,13 +133,19 @@ describe('packaged desktop runtime verification', () => {
       runtimeContext,
       () => { calls.push('static') },
       async (unpackedRoot) => { calls.push(unpackedRoot) },
+      () => { calls.push('electron') },
     )
 
-    expect(calls).toEqual(['static', resolvePackagedUnpackedRoot(runtimeContext)])
+    expect(calls).toEqual([
+      'static',
+      resolvePackagedUnpackedRoot(runtimeContext),
+      'electron',
+    ])
   })
 
-  it('tracks the ConPTY-only native surface shipped by node-pty 1.2', () => {
+  it('tracks ripgrep and the ConPTY native surface required on Windows', () => {
     expect(REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES).toEqual([
+      'node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe',
       'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
       'node_modules/node-pty/prebuilds/win32-x64/conpty_console_list.node',
       'node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe',
@@ -124,89 +157,103 @@ describe('packaged desktop runtime verification', () => {
     [
       'darwin',
       join('/build', 'DSH Desktop.app', 'Contents', 'Resources', 'app.asar'),
+      join('/build', 'DSH Desktop.app', 'Contents', 'MacOS', 'DSH Desktop'),
     ],
     [
       'win32',
       join('/build', 'resources', 'app.asar'),
+      join('/build', 'DSH Desktop.exe'),
     ],
-  ])('inspects the %s app.asar path', (platform, expectedPath) => {
+  ])('inspects the %s selective ASAR layout', (platform, expectedPath, expectedExecutable) => {
+    const runtimeContext = context('/build', platform)
     const list = vi.fn<ArchiveLister>(() => completeArchiveEntries(platform === 'win32' ? '\\' : '/'))
+    const fixture = physicalFixture(runtimeContext)
+    const listUnpacked = vi.fn(() => fixture.files)
 
-    const exists = vi.fn<FileProbe>(() => true)
-    const unpackedRoot = `${expectedPath}.unpacked`
-    const resolvePackage = vi.fn<PackageResolver>(completePackageResolver(unpackedRoot))
+    verifyPackagedRuntime(runtimeContext, list, fixture.exists, listUnpacked)
 
-    verifyPackagedRuntime(context('/build', platform), list, exists, resolvePackage)
-
-    expect(resolvePackagedAsarPath(context('/build', platform))).toBe(expectedPath)
-    expect(list).toHaveBeenCalledOnce()
+    expect(resolvePackagedAsarPath(runtimeContext)).toBe(expectedPath)
+    expect(resolvePackagedExecutablePath(runtimeContext)).toBe(expectedExecutable)
     expect(list).toHaveBeenCalledWith(expectedPath, { isPack: false })
-    expect(resolvePackagedUnpackedRoot(context('/build', platform))).toBe(unpackedRoot)
-    expect(exists).toHaveBeenCalledTimes(
-      REQUIRED_UNPACKED_RUNTIME_ENTRIES.length
-        + (platform === 'win32' ? REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES.length : 0)
-        + completeArchiveEntries().length,
-    )
-    expect(resolvePackage.mock.calls.map(([specifier]) => specifier))
-      .toEqual(REQUIRED_UNPACKED_PACKAGE_SPECIFIERS)
+    expect(listUnpacked).toHaveBeenCalledWith(`${expectedPath}.unpacked`)
   })
 
-  it('rejects an unsupported platform instead of guessing an archive layout', () => {
+  it('rejects an unsupported platform instead of guessing a package layout', () => {
     expect(() => resolvePackagedAsarPath(context('/build', 'mas')))
+      .toThrow('unsupported Electron afterPack platform "mas"')
+    expect(() => resolvePackagedExecutablePath(context('/build', 'mas')))
       .toThrow('unsupported Electron afterPack platform "mas"')
   })
 
   it('requires both CPU variants from a universal macOS runtime', () => {
     const runtimeContext = context('/build', 'darwin', 4)
-    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
     const missing = 'node_modules/@vscode/ripgrep-darwin-x64/bin/rg'
+    const incomplete = physicalFixture(runtimeContext, { missing })
 
     expect(() => verifyPackagedRuntime(
       runtimeContext,
       () => completeArchiveEntries(),
-      filename => filename !== join(unpackedRoot, missing),
-      completePackageResolver(unpackedRoot),
+      incomplete.exists,
+      () => incomplete.files,
     )).toThrow(`missing required physical entries: ${missing}`)
 
-    const exists = vi.fn<FileProbe>(filename => !FORBIDDEN_MACOS_UNIVERSAL_ENTRIES
-      .some(entry => filename === join(unpackedRoot, entry)))
-    verifyPackagedRuntime(
+    const complete = physicalFixture(runtimeContext)
+    expect(() => verifyPackagedRuntime(
       runtimeContext,
       () => completeArchiveEntries(),
-      exists,
-      completePackageResolver(unpackedRoot),
-    )
-    expect(exists).toHaveBeenCalledTimes(
-      REQUIRED_UNPACKED_RUNTIME_ENTRIES.length
-        + REQUIRED_MACOS_UNIVERSAL_ENTRIES.length
-        + FORBIDDEN_MACOS_UNIVERSAL_ENTRIES.length
-        + completeArchiveEntries().length,
-    )
+      complete.exists,
+      () => complete.files,
+    )).not.toThrow()
   })
 
-  it('rejects any ASAR-declared unpacked dependency missing from the physical tree', () => {
+  it('rejects unpacked files absent from the ASAR header', () => {
     const unpackedRoot = join('/build', 'resources', 'app.asar.unpacked')
-    const missing = 'node_modules/yaml/dist/index.js'
+    const unexpected = 'node_modules/unexpected/index.js'
 
-    expect(() => verifyUnpackedArchiveMirror(
-      new Set(['lib/main.js', missing, 'node_modules/zod/index.js']),
+    expect(() => verifySelectiveUnpackedRuntime(
+      new Set(['lib/main.js']),
       unpackedRoot,
-      filename => filename !== join(unpackedRoot, missing),
-    )).toThrow(`missing ASAR-declared physical entries: ${missing}`)
+      ['lib/main.js', unexpected],
+      () => false,
+    )).toThrow(`contains entries outside app.asar: ${unexpected}`)
+  })
+
+  it.each(FORBIDDEN_UNPACKED_RUNTIME_ENTRIES)(
+    'rejects mirrored ordinary module %s from the physical tree',
+    (forbidden) => {
+      const unpackedRoot = join('/build', 'resources', 'app.asar.unpacked')
+      expect(() => verifySelectiveUnpackedRuntime(
+        new Set([forbidden]),
+        unpackedRoot,
+        [forbidden],
+        filename => filename === join(unpackedRoot, forbidden),
+      )).toThrow(`mirrors ordinary archived modules: ${forbidden}`)
+    },
+  )
+
+  it('caps Electron Builder smartUnpack output instead of accepting a full mirror', () => {
+    const files = Array.from(
+      { length: MAX_UNPACKED_RUNTIME_FILES + 1 },
+      (_, index) => `node_modules/native-${String(index)}/binding.node`,
+    )
+    expect(() => verifySelectiveUnpackedRuntime(
+      new Set(files),
+      '/build/resources/app.asar.unpacked',
+      files,
+      () => false,
+    )).toThrow(`selective ASAR budget is ${String(MAX_UNPACKED_RUNTIME_FILES)}`)
   })
 
   it('rejects a host-architecture node-pty build from a universal app', () => {
     const runtimeContext = context('/build', 'darwin', 4)
-    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
     const forbidden = FORBIDDEN_MACOS_UNIVERSAL_ENTRIES[0]
+    const fixture = physicalFixture(runtimeContext, { extra: [forbidden] })
 
     expect(() => verifyPackagedRuntime(
       runtimeContext,
       () => completeArchiveEntries(),
-      filename => filename === join(unpackedRoot, forbidden)
-        || !FORBIDDEN_MACOS_UNIVERSAL_ENTRIES
-          .some(entry => filename === join(unpackedRoot, entry)),
-      completePackageResolver(unpackedRoot),
+      fixture.exists,
+      () => fixture.files,
     )).toThrow(`contains host-architecture build output: ${forbidden}`)
   })
 
@@ -217,118 +264,80 @@ describe('packaged desktop runtime verification', () => {
     'lib/profile-service.js',
     'lib/diagnostics.js',
     'lib/diagnostic-export-worker.js',
+    'lib/packaged-runtime-smoke.js',
     'lib/pnpm.js',
     'lib/update-download.js',
     'node_modules/open/index.js',
-  ])('fails loud when required runtime entry %s is absent', (missing) => {
+  ])('fails loud when required ASAR entry %s is absent', (missing) => {
     const entries = completeArchiveEntries().filter(entry => entry !== `/${missing}`)
 
-    expect(() => verifyPackagedRuntime(context('/build', 'win32'), () => entries, () => true))
+    expect(() => verifyPackagedRuntime(context('/build', 'win32'), () => entries, () => false))
       .toThrow(`missing required ASAR entries: ${missing}`)
   })
 
   it.each([
-    'package.json',
     'build/app-icon-mac.png',
     'build/tray-iconTemplate.png',
     'lib/native-ui/setup-wizard.html',
     'lib/terminal.js',
     'lib/diagnostics.js',
     'lib/diagnostic-export-worker.js',
+    'lib/packaged-runtime-smoke.js',
     'lib/update-download.js',
-    'node_modules/@deepseek-ai/dsh/lib/bin.js',
-    'node_modules/@deepseek-ai/dsh/lib/plugin-F7ZVfRyo.js',
-    'node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js',
-    'node_modules/open/index.js',
-    'node_modules/pnpm/bin/pnpm.mjs',
+    'node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe',
     'node_modules/node-pty/prebuilds/win32-x64/conpty.node',
-  ])('fails loud when physical runtime entry %s is absent from app.asar.unpacked', (missing) => {
+  ])('fails loud when selective physical entry %s is absent', (missing) => {
     const runtimeContext = context('/build', 'win32')
-    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
-    const missingPath = join(unpackedRoot, missing)
+    const fixture = physicalFixture(runtimeContext, { missing })
 
     expect(() => verifyPackagedRuntime(
       runtimeContext,
       () => completeArchiveEntries(),
-      filename => filename !== missingPath,
-      completePackageResolver(unpackedRoot),
+      fixture.exists,
+      () => fixture.files,
     )).toThrow(`missing required physical entries: ${missing}`)
   })
 
-  it('requires the physical Cordis preset and its bundled skills', () => {
-    const runtimeContext = context('/build', 'win32')
-    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
-    const requiredPresetEntries = [
-      'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/agent.cordis.yml',
-      'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
-      'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/editing-cordis-compositions/SKILL.md',
-    ]
+  it('runs every logical ASAR entry through the packaged Electron executable', () => {
+    const runtimeContext = context('/build', process.platform)
+    const dshVersion = JSON.parse(readFileSync(
+      new URL('../node_modules/@deepseek-ai/dsh/package.json', import.meta.url),
+      'utf8',
+    )).version as string
+    const pnpmVersion = JSON.parse(readFileSync(
+      new URL('../node_modules/pnpm/package.json', import.meta.url),
+      'utf8',
+    )).version as string
+    const run = vi.fn<PackagedElectronRunner>((_executable, args) => ({
+      status: 0,
+      stdout: args.some(arg => arg.endsWith('/@deepseek-ai/dsh/lib/bin.js'))
+        ? dshVersion
+        : args.some(arg => arg.endsWith('/pnpm/bin/pnpm.mjs'))
+          ? pnpmVersion
+          : args.some(arg => arg.endsWith('/lib/desktop-cli.js'))
+            ? 'Usage: dsh --profile headless [options]'
+          : 'DSH_PACKAGED_RUNTIME_OK',
+      stderr: '',
+    }))
 
-    for (const missing of requiredPresetEntries) {
-      expect(() => verifyPackagedRuntime(
-        runtimeContext,
-        () => completeArchiveEntries(),
-        filename => filename !== join(unpackedRoot, missing),
-        completePackageResolver(unpackedRoot),
-      )).toThrow(`missing required physical entries: ${missing}`)
+    smokePackagedElectronRuntime(runtimeContext, run)
+
+    expect(run).toHaveBeenCalledTimes(4)
+    for (const [executable, args, environment] of run.mock.calls) {
+      expect(executable).toBe(resolvePackagedExecutablePath(runtimeContext))
+      expect(args).toContain('--expose-internals')
+      expect(args.some(arg => arg.includes('app.asar'))).toBe(true)
+      expect(environment.ELECTRON_RUN_AS_NODE).toBe('1')
+      expect(environment.DSH_HOME).toEqual(expect.any(String))
     }
   })
 
-  it('fails loud when a required package export cannot resolve from app.asar.unpacked', () => {
-    const runtimeContext = context('/build', 'win32')
-    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
-    const resolvePackage = vi.fn<PackageResolver>((specifier) => {
-      if (specifier === 'dsh-plugin-desktop/profiles') {
-        throw new Error('missing export')
-      }
-      return completePackageResolver(unpackedRoot)(specifier)
-    })
+  it('does not try to execute a cross-platform package on the build host', () => {
+    const target = process.platform === 'win32' ? 'darwin' : 'win32'
+    const run = vi.fn<PackagedElectronRunner>()
 
-    expect(() => verifyPackagedRuntime(
-      runtimeContext,
-      () => completeArchiveEntries(),
-      () => true,
-      resolvePackage,
-    )).toThrow(
-      `packaged runtime at ${unpackedRoot} cannot resolve required package export dsh-plugin-desktop/profiles`,
-    )
-  })
+    smokePackagedElectronRuntime(context('/build', target), run)
 
-  it('fails loud when schemastery is absent from app.asar.unpacked', () => {
-    const runtimeContext = context('/build', 'win32')
-    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
-    const specifier = '@deepseek-ai/schemastery/package.json'
-    const resolvePackage = vi.fn<PackageResolver>((requested) => {
-      if (requested === specifier) throw new Error('missing package')
-      return completePackageResolver(unpackedRoot)(requested)
-    })
-
-    expect(() => verifyPackagedRuntime(
-      runtimeContext,
-      () => completeArchiveEntries(),
-      () => true,
-      resolvePackage,
-    )).toThrow(
-      `packaged runtime at ${unpackedRoot} cannot resolve required package export ${specifier}`,
-    )
-  })
-
-  it('fails loud when a required package export escapes app.asar.unpacked', () => {
-    const runtimeContext = context('/build', 'win32')
-    const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
-    const escapedPath = join('/workspace', 'node_modules', '@deepseek-ai', 'dsh-base', 'lib', 'index.js')
-    const resolvePackage = vi.fn<PackageResolver>((specifier) => {
-      if (specifier === '@deepseek-ai/dsh-base/package.json') return escapedPath
-      return completePackageResolver(unpackedRoot)(specifier)
-    })
-
-    expect(() => verifyPackagedRuntime(
-      runtimeContext,
-      () => completeArchiveEntries(),
-      () => true,
-      resolvePackage,
-    )).toThrow(
-      `required package export @deepseek-ai/dsh-base/package.json resolved outside ${unpackedRoot}: ${escapedPath}`,
-    )
+    expect(run).not.toHaveBeenCalled()
   })
 })

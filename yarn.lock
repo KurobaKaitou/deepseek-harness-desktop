@@ -1602,6 +1602,29 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@deepseek-ai/dsh-app-boot@patch:@deepseek-ai/dsh-app-boot@file%3Avendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-app-boot-0.1.2-rc.1.tgz#./patches/dsh-app-boot@0.1.2-rc.1.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 0.1.2-rc.1
+  resolution: "@deepseek-ai/dsh-app-boot@patch:@deepseek-ai/dsh-app-boot@file%3Avendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-app-boot-0.1.2-rc.1.tgz%23vendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-app-boot-0.1.2-rc.1.tgz%3A%3Ahash=c3c69a&locator=deepseek-harness-desktop%2540workspace%253A.#./patches/dsh-app-boot@0.1.2-rc.1.patch::version=0.1.2-rc.1&hash=54cb75&locator=deepseek-harness-desktop%40workspace%3A."
+  dependencies:
+    "@deepseek-ai/dsh-atomic-write": "npm:^0.1.2-rc.1"
+    js-yaml: "npm:^4.2.0"
+    resolve.exports: "npm:^2.0.3"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.2
+    "@deepseek-ai/cordis-plugin-group": ^1.0.2
+    "@deepseek-ai/cordis-plugin-hmr": ^1.0.17
+    "@deepseek-ai/cordis-plugin-include": ^1.0.7
+    "@deepseek-ai/cordis-plugin-loader": ^1.0.3
+    "@deepseek-ai/dsh-home-paths": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-launch-environment": ^0.1.2-rc.1
+    "@deepseek-ai/dsh-system-prompt": ^0.1.2-rc.1
+  peerDependenciesMeta:
+    "@deepseek-ai/cordis-plugin-hmr":
+      optional: true
+  checksum: 10c0/81663db242c1811776d47d936026412b691908359f948af04a0e77a2efb37913f0eb7c995f1ae45cc9f2a267fc9439f9a9f8fe74f6ad44e6218fa30b40842918
+  languageName: node
+  linkType: hard
+
 "@deepseek-ai/dsh-atomic-write@file:vendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-atomic-write-0.1.2-rc.1.tgz::locator=deepseek-harness-desktop%40workspace%3A.":
   version: 0.1.2-rc.1
   resolution: "@deepseek-ai/dsh-atomic-write@file:vendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-atomic-write-0.1.2-rc.1.tgz#vendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-atomic-write-0.1.2-rc.1.tgz::hash=2a6cf3&locator=deepseek-harness-desktop%40workspace%3A."
@@ -11028,7 +11051,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@vscode/ripgrep@npm:^1.18.0":
+"@vscode/ripgrep@npm:1.18.0":
   version: 1.18.0
   resolution: "@vscode/ripgrep@npm:1.18.0"
   dependencies:
@@ -11070,6 +11093,51 @@ __metadata:
     "@vscode/ripgrep-win32-x64":
       optional: true
   checksum: 10c0/163b64cbc864888392616d28df6ff1cbf3c10078f218d2a1f070c25b42cf20c7013b7bf4bbd87a0235d6379d01d17a9a3a7bdb310cb35f1f2d0977418739742d
+  languageName: node
+  linkType: hard
+
+"@vscode/ripgrep@patch:@vscode/ripgrep@npm%3A1.18.0#./patches/vscode-ripgrep@1.18.0.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 1.18.0
+  resolution: "@vscode/ripgrep@patch:@vscode/ripgrep@npm%3A1.18.0#./patches/vscode-ripgrep@1.18.0.patch::version=1.18.0&hash=c48e52&locator=deepseek-harness-desktop%40workspace%3A."
+  dependencies:
+    "@vscode/ripgrep-darwin-arm64": "npm:1.18.0"
+    "@vscode/ripgrep-darwin-x64": "npm:1.18.0"
+    "@vscode/ripgrep-linux-arm": "npm:1.18.0"
+    "@vscode/ripgrep-linux-arm64": "npm:1.18.0"
+    "@vscode/ripgrep-linux-ia32": "npm:1.18.0"
+    "@vscode/ripgrep-linux-ppc64": "npm:1.18.0"
+    "@vscode/ripgrep-linux-riscv64": "npm:1.18.0"
+    "@vscode/ripgrep-linux-s390x": "npm:1.18.0"
+    "@vscode/ripgrep-linux-x64": "npm:1.18.0"
+    "@vscode/ripgrep-win32-arm64": "npm:1.18.0"
+    "@vscode/ripgrep-win32-ia32": "npm:1.18.0"
+    "@vscode/ripgrep-win32-x64": "npm:1.18.0"
+  dependenciesMeta:
+    "@vscode/ripgrep-darwin-arm64":
+      optional: true
+    "@vscode/ripgrep-darwin-x64":
+      optional: true
+    "@vscode/ripgrep-linux-arm":
+      optional: true
+    "@vscode/ripgrep-linux-arm64":
+      optional: true
+    "@vscode/ripgrep-linux-ia32":
+      optional: true
+    "@vscode/ripgrep-linux-ppc64":
+      optional: true
+    "@vscode/ripgrep-linux-riscv64":
+      optional: true
+    "@vscode/ripgrep-linux-s390x":
+      optional: true
+    "@vscode/ripgrep-linux-x64":
+      optional: true
+    "@vscode/ripgrep-win32-arm64":
+      optional: true
+    "@vscode/ripgrep-win32-ia32":
+      optional: true
+    "@vscode/ripgrep-win32-x64":
+      optional: true
+  checksum: 10c0/9003c516051d8173876a501a11ca09f8a005e1854a4c9ffc68695e31cc69010a28e4e68eb76e16e988d2d34447af3282cf074cda2746fda850d33e9e52af6b99
   languageName: node
   linkType: hard
 

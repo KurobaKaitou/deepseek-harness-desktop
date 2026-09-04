@@ -76,7 +76,7 @@ describe('desktop profile composition', {
     expect(minimalPreset).toContain("disabled: !!js process.platform !== 'win32'")
   })
 
-  it('reads packaged Cordis skills from the physical unpacked preset root', () => {
+  it('reads packaged Cordis skills from the logical ASAR preset root', () => {
     const home = temporaryHome()
     const resources = join(home, 'resources')
     const archivedPresets = join(
@@ -86,16 +86,9 @@ describe('desktop profile composition', {
       '@deepseek-ai',
       'dsh-agent-presets',
     )
-    const physicalPresetRoot = join(
-      resources,
-      'app.asar.unpacked',
-      'node_modules',
-      '@deepseek-ai',
-      'dsh-agent-presets',
-      'presets',
-    )
+    const archivedPresetRoot = join(archivedPresets, 'presets')
     const skillPath = join(
-      physicalPresetRoot,
+      archivedPresetRoot,
       'cordis',
       'skills',
       'cordis-plugin-development',
@@ -113,7 +106,7 @@ describe('desktop profile composition', {
     const moduleUrl = pathToFileURL(join(resources, 'app.asar', 'lib', 'profile.js')).href
     const resolvedRoot = shippedPresetRoot(moduleUrl)
 
-    expect(resolvedRoot).toBe(realpathSync(physicalPresetRoot))
+    expect(resolvedRoot).toBe(realpathSync(archivedPresetRoot))
     expect(readFileSync(join(
       resolvedRoot,
       'cordis',

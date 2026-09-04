@@ -1,22 +1,21 @@
 /** Profile-relative package resolution for Electron's restricted Node runtime. */
 
 import Module, { registerHooks } from 'node:module'
-import { dirname } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { unpackedAsarPath } from './packaged-runtime-path.ts'
 import {
   findOverlayPackage,
   packageNameFromSpecifier,
   resolveOverlayPackage,
 } from './package-overlay.ts'
+import { retainAsarModuleResolver } from './asar-module-resolver-state.ts'
 
 const LOADER_ENTRY_URL = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
-const DESKTOP_ENTRY_URL = pathToFileURL(
-  unpackedAsarPath(fileURLToPath(new URL('../lib/index.js', import.meta.url))),
-).href
-const DESKTOP_PACKAGE_URL = pathToFileURL(
-  unpackedAsarPath(fileURLToPath(new URL('../package.json', import.meta.url))),
-).href
+// Keep installation resolution in Electron's logical ASAR tree. Native
+// payloads are redirected by Electron Builder, while ordinary modules avoid a
+// second physical node_modules tree and its Windows antivirus I/O cost.
+const DESKTOP_ENTRY_URL = pathToFileURL(fileURLToPath(new URL('../lib/index.js', import.meta.url))).href
+const DESKTOP_PACKAGE_URL = pathToFileURL(fileURLToPath(new URL('../package.json', import.meta.url))).href
 
 interface CommonJsModuleResolver {
   _resolveFilename(
@@ -39,6 +38,11 @@ function isBareSpecifier(specifier: string): boolean {
   return !specifier.startsWith('.') && !specifier.startsWith('/') && !URL.canParse(specifier)
 }
 
+function isMissingModule(cause: unknown): boolean {
+  const code = (cause as NodeJS.ErrnoException | null)?.code
+  return code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND'
+}
+
 /**
  * Resolve Cordis Loader bare imports from the selected persistent profile.
  * @param profileBaseUrl - file URL inside the profile that owns plugin dependencies.
@@ -47,6 +51,23 @@ function isBareSpecifier(specifier: string): boolean {
 export function installProfilePackageResolver(profileBaseUrl: string): () => void {
   const profileManifestPath = fileURLToPath(profileBaseUrl)
   const profileDirectory = dirname(profileManifestPath)
+  const sharedFallbackDirectory = join(dirname(profileDirectory), 'node_modules')
+  const fromProfileBoundary = (url: string | undefined): boolean => {
+    if (url === LOADER_ENTRY_URL || url === profileBaseUrl) return true
+    if (url === undefined || !url.startsWith('file:')) return false
+    const candidate = relative(profileDirectory, fileURLToPath(url))
+    // Node's Loader uses both the directory URL and direct config/manifest
+    // files as bare-package anchors, depending on which import path mounted a
+    // row. Never broaden this to descendants such as another Profile.
+    return candidate === ''
+      || (!candidate.includes(sep) && candidate !== '..' && !isAbsolute(candidate))
+  }
+  const fromObsoleteSharedFallback = (url: string): boolean => {
+    if (!url.startsWith('file:')) return false
+    const candidate = relative(sharedFallbackDirectory, fileURLToPath(url))
+    return candidate === ''
+      || (candidate !== '..' && !candidate.startsWith(`..${sep}`) && !isAbsolute(candidate))
+  }
 
   // ClientModuleRegistry intentionally uses createRequire(ctx.baseUrl) to
   // resolve each browser bundle from the config tree. Node's ESM resolve hook
@@ -85,6 +106,7 @@ export function installProfilePackageResolver(profileBaseUrl: string): () => voi
     return previousResolveFilename.call(this, request, parent, isMain, options)
   }
   commonJsModule._resolveFilename = overlayResolveFilename
+  const releaseAsarResolver = retainAsarModuleResolver()
 
   // Track the module graph rooted at every overlay-selected Loader package.
   const overlayModuleUrls = new Set<string>()
@@ -94,8 +116,7 @@ export function installProfilePackageResolver(profileBaseUrl: string): () => voi
       // with the config tree's base URL as their parent. Keep the Loader entry
       // URL for the native dynamic-import fallback, and recognize the Profile
       // manifest anchor used by Electron's internal loader as the same boundary.
-      const fromLoader = context.parentURL === LOADER_ENTRY_URL
-        || context.parentURL === profileBaseUrl
+      const fromLoader = fromProfileBoundary(context.parentURL)
       const packageName = fromLoader ? packageNameFromSpecifier(specifier) : undefined
       if (packageName !== undefined) {
         const overlay = resolveOverlayPackage(packageName, {
@@ -119,14 +140,31 @@ export function installProfilePackageResolver(profileBaseUrl: string): () => voi
       }
       try {
         const resolved = nextResolve(specifier, context)
-        overlayModuleUrls.add(resolved.url)
-        return resolved
+        // Releases before selective ASAR may have left upstream-generated
+        // ESM proxies in profiles/node_modules. They are not authoritative for
+        // CJS or wildcard exports, so bypass them while this resolver owns the
+        // graph and continue to the real Profile/Desktop anchors.
+        if (!fromObsoleteSharedFallback(resolved.url)) {
+          overlayModuleUrls.add(resolved.url)
+          return resolved
+        }
       } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') throw cause
-        const resolved = nextResolve(specifier, { ...context, parentURL: profileBaseUrl })
-        overlayModuleUrls.add(resolved.url)
-        return resolved
+        if (!isMissingModule(cause)) throw cause
       }
+      try {
+        const resolved = nextResolve(specifier, { ...context, parentURL: profileBaseUrl })
+        if (!fromObsoleteSharedFallback(resolved.url)) {
+          overlayModuleUrls.add(resolved.url)
+          return resolved
+        }
+      } catch (profileCause) {
+        if (!isMissingModule(profileCause)) throw profileCause
+      }
+      // Let Node itself apply import/require conditions, exact subpaths,
+      // wildcard exports, and package format from the logical ASAR tree.
+      const resolved = nextResolve(specifier, { ...context, parentURL: DESKTOP_ENTRY_URL })
+      overlayModuleUrls.add(resolved.url)
+      return resolved
     },
   })
   let active = true
@@ -134,6 +172,7 @@ export function installProfilePackageResolver(profileBaseUrl: string): () => voi
     if (!active) return
     active = false
     hooks.deregister()
+    releaseAsarResolver()
     if (commonJsModule._resolveFilename === overlayResolveFilename) {
       commonJsModule._resolveFilename = previousResolveFilename
     }

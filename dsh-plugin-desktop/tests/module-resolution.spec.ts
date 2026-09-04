@@ -115,6 +115,22 @@ describe('installProfilePackageResolver', () => {
     })
   })
 
+  it('recognizes the clean-boot Profile directory URL as a Loader boundary', () => {
+    const profileBaseUrl = 'file:///tmp/dsh/profiles/desktop/package.json'
+    installProfilePackageResolver(profileBaseUrl)
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => ({ specifier, context }))
+
+    expect(harness.resolve?.(
+      '@deepseek-ai/dsh-web-app',
+      { parentURL: 'file:///tmp/dsh/profiles/desktop/' },
+      nextResolve,
+    )).toEqual({
+      specifier: '@deepseek-ai/dsh-web-app',
+      context: { parentURL: profileBaseUrl },
+    })
+    expect(harness.overlay).toHaveBeenCalledWith('@deepseek-ai/dsh-web-app', expect.any(Object))
+  })
+
   it('keeps non-package Loader specifiers on ordinary Node resolution', () => {
     installProfilePackageResolver('file:///C:/Users/test/profile/package.json')
     const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => ({ specifier, context }))
@@ -168,6 +184,44 @@ describe('installProfilePackageResolver', () => {
 
     expect(harness.resolve?.('plugin', { parentURL: loaderEntryUrl }, nextResolve)).toEqual({ url: desktopPluginUrl })
     expect(harness.resolve?.('profile-peer', { parentURL: desktopPluginUrl }, nextResolve)).toEqual({ url: profilePeerUrl })
+  })
+
+  it('falls back to the Desktop installation after CommonJS-style misses', () => {
+    const profileBaseUrl = 'file:///tmp/dsh/profiles/desktop/package.json'
+    const pluginUrl = 'file:///tmp/dsh/profiles/desktop/node_modules/plugin/index.cjs'
+    const desktopDependencyUrl = 'file:///Applications/DSH.app/Contents/Resources/app.asar/node_modules/dependency/index.cjs'
+    installProfilePackageResolver(profileBaseUrl)
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => {
+      if (specifier === 'plugin' && context.parentURL === profileBaseUrl) return { url: pluginUrl }
+      if (specifier === 'dependency' && context.parentURL?.endsWith('/lib/index.js')) {
+        return { url: desktopDependencyUrl }
+      }
+      throw Object.assign(new Error(`missing ${specifier}`), { code: 'MODULE_NOT_FOUND' })
+    })
+
+    expect(harness.resolve?.('plugin', { parentURL: profileBaseUrl }, nextResolve)).toEqual({ url: pluginUrl })
+    expect(harness.resolve?.('dependency', { parentURL: pluginUrl }, nextResolve))
+      .toEqual({ url: desktopDependencyUrl })
+  })
+
+  it('bypasses an obsolete shared Profile proxy before using the Desktop package', () => {
+    const profileBaseUrl = 'file:///tmp/dsh/profiles/desktop/package.json'
+    const pluginUrl = 'file:///tmp/dsh/profiles/desktop/node_modules/plugin/index.cjs'
+    const staleUrl = 'file:///tmp/dsh/profiles/node_modules/@deepseek-ai/schemastery/index.js'
+    const desktopUrl = 'file:///Applications/DSH.app/Contents/Resources/app.asar/node_modules/@deepseek-ai/schemastery/lib/index.cjs'
+    installProfilePackageResolver(profileBaseUrl)
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => {
+      if (specifier === 'plugin' && context.parentURL === profileBaseUrl) return { url: pluginUrl }
+      if (specifier === '@deepseek-ai/schemastery' && context.parentURL?.endsWith('/lib/index.js')) {
+        return { url: desktopUrl }
+      }
+      return { url: staleUrl }
+    })
+
+    expect(harness.resolve?.('plugin', { parentURL: profileBaseUrl }, nextResolve)).toEqual({ url: pluginUrl })
+    expect(harness.resolve?.('@deepseek-ai/schemastery', { parentURL: pluginUrl }, nextResolve))
+      .toEqual({ url: desktopUrl })
+    expect(nextResolve).toHaveBeenCalledTimes(4)
   })
 
   it('does not expose Profile dependencies to unrelated modules', () => {

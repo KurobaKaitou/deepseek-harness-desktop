@@ -29,8 +29,8 @@ import FileSettingsProvider, {
   type Config as SettingsFileConfig,
 } from '@deepseek-ai/dsh-settings-file'
 import { parseAllDocuments, parseDocument } from 'yaml'
-import { unpackedAsarPath } from './packaged-runtime-path.ts'
 import { findOverlayPackage, resolveOverlayPackage } from './package-overlay.ts'
+import { withAsarModuleResolver } from './asar-module-resolver-state.ts'
 import { DESKTOP_DEFAULT_WEB_PORT } from './desktop-port.ts'
 import {
   desktopBrowserAccessEnabled,
@@ -78,7 +78,10 @@ const BIN_NAME = DESKTOP_PACKAGE_NAME
 const REQUIRED_BUNDLES = requiredWebBundles()
 const REQUIRED_BUNDLE_SET = new Set(REQUIRED_BUNDLES)
 const OBSOLETE_DESKTOP_BUNDLE_SET = new Set(['@deepseek-ai/dsh-desktop-app'])
-const INSTALL_ANCHOR = unpackedAsarPath(fileURLToPath(new URL('../package.json', import.meta.url)))
+// Electron's patched fs/module APIs read this logical ASAR path directly. The
+// Desktop resolver bridges out-of-tree Profile plugins back into this virtual
+// installation without materializing an incomplete ESM-only proxy tree.
+const INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))
 const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
 const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
 const AUTO_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-auto'
@@ -549,9 +552,7 @@ function loadRecoveryFilteredProfile(
 /** Resolve the agent presets shipped by the matching presets dependency. */
 export function shippedPresetRoot(moduleUrl: string = import.meta.url): string {
   const require = createRequire(moduleUrl)
-  return unpackedAsarPath(
-    join(dirname(require.resolve('@deepseek-ai/dsh-agent-presets/package.json')), 'presets'),
-  )
+  return join(dirname(require.resolve('@deepseek-ai/dsh-agent-presets/package.json')), 'presets')
 }
 
 /** Read a row's object config without trusting arbitrary YAML values. */
@@ -1114,11 +1115,14 @@ export function prepareDesktopProfile(
 
 /** Maintain the upstream module fallback for one fully resolved Desktop profile. */
 export function healDesktopProfileModuleFallback(home: string, profile?: Profile): Promise<void> {
-  return healProfilesModuleFallback({
+  const heal = () => healProfilesModuleFallback({
     installAnchor: INSTALL_ANCHOR,
     home,
     ...(profile === undefined ? {} : { profile }),
   })
+  return /([\\/])app\.asar\1/u.test(INSTALL_ANCHOR)
+    ? withAsarModuleResolver(heal)
+    : heal()
 }
 
 /** Expose the package anchor for focused resolution tests. */

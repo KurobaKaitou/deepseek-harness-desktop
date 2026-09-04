@@ -314,16 +314,17 @@
   "build": {
     "appId": "ai.deepseek.dsh.desktop",
     "productName": "DSH Desktop",
-    "asar": true,
+    "asar": {
+      "smartUnpack": true
+    },
     "asarUnpack": [
-      "package.json",
-      "cordis.patch.yml",
       "build/**",
-      "lib/**",
-      "node_modules/**"
+      "lib/**"
     ],
     "afterPack": "./scripts/verify-packaged-runtime.ts",
     "electronFuses": {
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
       "runAsNode": true
     },
     "directories": {
