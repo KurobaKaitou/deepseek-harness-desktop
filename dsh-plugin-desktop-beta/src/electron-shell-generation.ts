@@ -252,7 +252,9 @@ export class ElectronShellGeneration {
     let startupSurfaceRevealed = false
     const revealStartupSurface = (): void => {
       if (window.isDestroyed()) return
-      if (startupSurfaceRevealed && !applicationNeedsReveal(window, platform.platform)) return
+      // A late ready-to-show must not override the user's decision to hide the
+      // window after the startup surface was revealed early.
+      if (startupSurfaceRevealed) return
       startupSurfaceRevealed = true
       this.show()
     }
