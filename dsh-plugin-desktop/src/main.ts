@@ -122,6 +122,7 @@ import {
   migrateDesktopBrowserAccessSettings,
   migrateDesktopWindowMaterialSettings,
   readDesktopSetupWizardSettings,
+  sameDesktopSetupWizardSettings,
   updateDesktopSetupWizardSettings,
   type DesktopSetupWizardSettings,
 } from './setup-wizard-settings.ts'
@@ -353,16 +354,16 @@ function setupSettingsWithProfilePreferences(
   })
 }
 
-/** Mirror only the Profile-owned settings leaves into the exact prepared document. */
+/** Mirror only the Profile-owned settings leaves and report a semantic change. */
 async function mirrorDesktopProfilePreferences(
   settingsDocument: string,
   preferences: DesktopProfilePreferences,
-): Promise<void> {
+): Promise<boolean> {
   const current = readDesktopSetupWizardSettings(settingsDocument)
-  await updateDesktopSetupWizardSettings(
-    settingsDocument,
-    setupSettingsWithProfilePreferences(current, preferences),
-  )
+  const next = setupSettingsWithProfilePreferences(current, preferences)
+  if (sameDesktopSetupWizardSettings(current, next)) return false
+  await updateDesktopSetupWizardSettings(settingsDocument, next)
+  return true
 }
 
 /** Start one Electron process and leave lifetime to the mounted desktop plugin. */
@@ -968,7 +969,6 @@ async function start(): Promise<void> {
         }
       },
     }
-    await healDesktopProfileModuleFallback(homeDir)
     let prepared = prepareDesktopProfile(
       process.env.DSH_TELEMETRY_DISABLED,
       homeDir,
@@ -1038,9 +1038,13 @@ async function start(): Promise<void> {
     } else {
       // Existing Profile state is the source of truth. Mirror it only after the
       // first prepare has resolved this Profile's exact settings document.
-      await mirrorDesktopProfilePreferences(prepared.settingsDocument, profilePreferences)
+      const profileSettingsChanged = await mirrorDesktopProfilePreferences(
+        prepared.settingsDocument,
+        profilePreferences,
+      )
+      let windowMaterialMigrated = false
       try {
-        await migrateDesktopWindowMaterialSettings(prepared.settingsDocument)
+        windowMaterialMigrated = await migrateDesktopWindowMaterialSettings(prepared.settingsDocument)
       } catch (cause) {
         // Keep retrying the device-owned Acrylic cleanup on later launches,
         // even after this Profile has completed its one-time preference import.
@@ -1048,17 +1052,24 @@ async function start(): Promise<void> {
           `${BIN_NAME}: failed to persist removed Acrylic material migration: ${cause instanceof Error ? cause.message : String(cause)}`,
         )
       }
-      await selectDesktopMarketProvider(marketUserDataDir, profilePreferences.market)
-      marketSelection = readDesktopMarketStateForUserData(marketUserDataDir)
-      prepared = prepareDesktopProfile(
-        process.env.DSH_TELEMETRY_DISABLED,
-        homeDir,
-        process.platform,
-        activeProfileName,
-        pluginManagementStatePath,
-        marketSelection,
-        preparationHooks,
-      )
+      marketSelection = legacyMarketSelection.legacyDefaulted
+        || legacyMarketSelection.requested !== profilePreferences.market
+        ? await selectDesktopMarketProvider(marketUserDataDir, profilePreferences.market)
+        : legacyMarketSelection
+      // Reuse the first immutable preparation when both mirrors were semantic
+      // no-ops. This is the steady-state path and avoids reparsing every bundle,
+      // patch, manifest, and settings document on each cold start.
+      if (profileSettingsChanged || windowMaterialMigrated) {
+        prepared = prepareDesktopProfile(
+          process.env.DSH_TELEMETRY_DISABLED,
+          homeDir,
+          process.platform,
+          activeProfileName,
+          pluginManagementStatePath,
+          marketSelection,
+          preparationHooks,
+        )
+      }
     }
     // Safe Mode must reach the working surface with shipped defaults. Its
     // disposable Desktop state deliberately has no Setup marker, so reading
@@ -1246,6 +1257,10 @@ async function start(): Promise<void> {
       clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
       dshBootstrapPath,
     }
+    // The upstream fallback healer resolves the complete installed dependency
+    // closure before projecting Profile-only packages. Run it once, after every
+    // settings/Market/migration re-prepare has selected the final Profile, so a
+    // cold start does not traverse the installation graph twice.
     await healDesktopProfileModuleFallback(homeDir, prepared.profile)
     if (profilePreferences === undefined) {
       throw new Error(`${BIN_NAME}: active Profile preferences were not initialized`)
