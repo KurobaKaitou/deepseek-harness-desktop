@@ -17,6 +17,8 @@ import {
   FORBIDDEN_UNPACKED_RUNTIME_ENTRIES,
   indexPackagedAsarHeader,
   listDesktopRuntimeEntries,
+  MAX_PNPM_SMART_UNPACK_BYTES,
+  MAX_PNPM_SMART_UNPACK_FILES,
   MAX_UNPACKED_RUNTIME_BYTES,
   MAX_UNPACKED_RUNTIME_FILES,
   REQUIRED_DSH_CLI_RUNTIME_ENTRIES,
@@ -506,8 +508,42 @@ describe('packaged desktop runtime verification', () => {
 
   it('keeps the reviewed smart-unpack surface explicit', () => {
     expect(ALLOWED_SMART_UNPACK_PACKAGE_ROOTS).toContain('node_modules/node-pty')
+    expect(ALLOWED_SMART_UNPACK_PACKAGE_ROOTS).toContain('node_modules/pnpm')
     expect(ALLOWED_SMART_UNPACK_PACKAGE_PREFIXES).toContain('node_modules/@vscode/ripgrep-')
     expect(ALLOWED_SMART_UNPACK_PACKAGE_PREFIXES).toContain('node_modules/@img/sharp-')
+  })
+
+  it('accepts pnpm as an indivisible smart-unpacked package with native helpers', () => {
+    const files = [
+      { path: 'node_modules/pnpm/bin/pnpm.mjs', bytes: 10 },
+      { path: 'node_modules/pnpm/dist/vendor/fastlist-0.3.0-x64.exe', bytes: 20 },
+    ]
+    expect(() => verifySelectiveUnpackedRuntime(
+      asarIndex(files.map(file => file.path)),
+      '/build/resources/app.asar.unpacked',
+      files,
+    )).not.toThrow()
+  })
+
+  it('caps pnpm smart-unpack independently of the full physical payload budget', () => {
+    const expectedBudget = `${String(MAX_PNPM_SMART_UNPACK_FILES)} files/`
+      + `${String(MAX_PNPM_SMART_UNPACK_BYTES)} bytes`
+    const tooManyFiles = Array.from(
+      { length: MAX_PNPM_SMART_UNPACK_FILES + 1 },
+      (_, index) => ({ path: `node_modules/pnpm/native-${String(index)}.node`, bytes: 1 }),
+    )
+    expect(() => verifySelectiveUnpackedRuntime(
+      asarIndex(tooManyFiles.map(file => file.path)),
+      '/build/resources/app.asar.unpacked',
+      tooManyFiles,
+    )).toThrow(`pnpm smart-unpack budget ${expectedBudget}`)
+
+    const path = 'node_modules/pnpm/bin/pnpm.mjs'
+    expect(() => verifySelectiveUnpackedRuntime(
+      asarIndex([path]),
+      '/build/resources/app.asar.unpacked',
+      [{ path, bytes: MAX_PNPM_SMART_UNPACK_BYTES + 1 }],
+    )).toThrow(`pnpm smart-unpack budget ${expectedBudget}`)
   })
 
   it('caps Electron Builder smartUnpack output instead of accepting a full mirror', () => {

@@ -71,12 +71,18 @@ export const MAX_UNPACKED_RUNTIME_FILES = 1_500
 /** Maximum physical payload accepted beside ASAR after smart unpack. */
 export const MAX_UNPACKED_RUNTIME_BYTES = 128 * 1024 * 1024
 
-/** Native package roots electron-builder may unpack as one indivisible unit. */
+/** Narrow ceiling for pnpm's smart-unpacked native-helper package root. */
+export const MAX_PNPM_SMART_UNPACK_FILES = 32
+export const MAX_PNPM_SMART_UNPACK_BYTES = 32 * 1024 * 1024
+
+/** Package roots electron-builder may smart-unpack as one indivisible unit. */
 export const ALLOWED_SMART_UNPACK_PACKAGE_ROOTS = [
   'node_modules/fs-ext',
   'node_modules/koffi',
   'node_modules/node-addon-require-builtin',
   'node_modules/node-pty',
+  // pnpm embeds executable and native helper payloads.
+  'node_modules/pnpm',
   'node_modules/sharp',
 ] as const
 
@@ -160,7 +166,6 @@ export const FORBIDDEN_UNPACKED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-web-app/lib/index.js',
   'node_modules/@vscode/ripgrep/lib/index.js',
   'node_modules/open/index.js',
-  'node_modules/pnpm/bin/pnpm.mjs',
   'node_modules/yaml/dist/index.js',
 ] as const
 
@@ -679,6 +684,15 @@ export function verifySelectiveUnpackedRuntime(
   if (unexpectedPackageRoots.length > 0) {
     throw new Error(
       `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} contains non-allowlisted package roots: ${unexpectedPackageRoots.join(', ')}; inventory: ${inventory}`,
+    )
+  }
+  const pnpm = summary.groups.find(group => group.root === 'node_modules/pnpm')
+  if (pnpm !== undefined
+    && (pnpm.files > MAX_PNPM_SMART_UNPACK_FILES || pnpm.bytes > MAX_PNPM_SMART_UNPACK_BYTES)) {
+    throw new Error(
+      `dsh-plugin-desktop: unpacked runtime at ${unpackedRoot} exceeds pnpm smart-unpack budget `
+      + `${String(MAX_PNPM_SMART_UNPACK_FILES)} files/${String(MAX_PNPM_SMART_UNPACK_BYTES)} bytes; `
+      + `inventory: ${inventory}`,
     )
   }
   if (summary.files > MAX_UNPACKED_RUNTIME_FILES) {
