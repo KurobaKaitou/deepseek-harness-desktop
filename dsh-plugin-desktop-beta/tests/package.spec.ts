@@ -314,6 +314,30 @@ describe('published package surface', () => {
     }
   })
 
+  it('patches alpha app boot to keep packaged Profile fallbacks resolver-owned', () => {
+    const patchPath = './patches/dsh-app-boot@0.1.3-alpha.1.patch'
+    for (const selector of [
+      `@deepseek-ai/dsh-app-boot@npm:${runtimeVersion}`,
+      `@deepseek-ai/dsh-app-boot@npm:^${runtimeVersion}`,
+    ]) {
+      expect(String(workspaceManifest.resolutions?.[selector])).toContain(patchPath)
+    }
+    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
+    const installedAppBoot = readFileSync(new URL(
+      'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+      packageRoot,
+    ), 'utf8')
+    for (const marker of [
+      'Symbol.for("dsh-plugin-desktop.asar-module-resolver")',
+      'healProfileModuleFallback(profile, /* @__PURE__ */ new Set(), installAnchor)',
+      'isInstallationPackage = () => false',
+      'visited.has(dep) || isInstallationPackage(dep)',
+    ]) {
+      expect(patch).toContain(marker)
+      expect(installedAppBoot).toContain(marker)
+    }
+  })
+
   it('keeps the Stable and Beta DSH runtime families side by side', () => {
     const dshResolutions = Object.entries(workspaceManifest.resolutions ?? {})
       .filter(([selector]) => /^@deepseek-ai\/dsh(?:@|-)/u.test(selector))
