@@ -5189,6 +5189,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@deepseek-ai/dsh-session-persistence-jsonl@patch:@deepseek-ai/dsh-session-persistence-jsonl@file%3Avendor/dsh-runtime/0.1.3-alpha.1/deepseek-ai-dsh-session-persistence-jsonl-0.1.3-alpha.1.tgz#./patches/dsh-session-persistence-jsonl@0.1.3-alpha.1.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 0.1.3-alpha.1
+  resolution: "@deepseek-ai/dsh-session-persistence-jsonl@patch:@deepseek-ai/dsh-session-persistence-jsonl@file%3Avendor/dsh-runtime/0.1.3-alpha.1/deepseek-ai-dsh-session-persistence-jsonl-0.1.3-alpha.1.tgz%23vendor/dsh-runtime/0.1.3-alpha.1/deepseek-ai-dsh-session-persistence-jsonl-0.1.3-alpha.1.tgz%3A%3Ahash=72b3d1&locator=deepseek-harness-desktop%2540workspace%253A.#./patches/dsh-session-persistence-jsonl@0.1.3-alpha.1.patch::version=0.1.3-alpha.1&hash=4887cf&locator=deepseek-harness-desktop%40workspace%3A."
+  dependencies:
+    "@deepseek-ai/dsh-session-format": "npm:^0.1.3-alpha.1"
+    "@deepseek-ai/dsh-session-format-catalog": "npm:^0.1.3-alpha.1"
+    "@deepseek-ai/schemastery": "npm:^3.18.2"
+    fs-ext: "npm:2.1.1"
+    koffi: "npm:^3.1.0"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.2
+    "@deepseek-ai/dsh-session": ^0.1.3-alpha.1
+    "@deepseek-ai/dsh-session-persistence": ^0.1.3-alpha.1
+  checksum: 10c0/7531c6eca44d0bc4503e1630bf0c6612bd932a66fdcae2fd5ab41d4a00ca533cf2ca26a86e5c484d8b937b7f49e8476562c7330ce6392f0716fed6b802a1f647
+  languageName: node
+  linkType: hard
+
 "@deepseek-ai/dsh-session-persistence@file:vendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-session-persistence-0.1.2-rc.1.tgz::locator=deepseek-harness-desktop%40workspace%3A.":
   version: 0.1.2-rc.1
   resolution: "@deepseek-ai/dsh-session-persistence@file:vendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-session-persistence-0.1.2-rc.1.tgz#vendor/dsh-runtime/0.1.2-rc.1/deepseek-ai-dsh-session-persistence-0.1.2-rc.1.tgz::hash=3ea350&locator=deepseek-harness-desktop%40workspace%3A."
@@ -13667,11 +13684,11 @@ __metadata:
 
 "fs-ext@patch:fs-ext@npm%3A2.1.1#./patches/fs-ext@2.1.1.patch::locator=deepseek-harness-desktop%40workspace%3A.":
   version: 2.1.1
-  resolution: "fs-ext@patch:fs-ext@npm%3A2.1.1#./patches/fs-ext@2.1.1.patch::version=2.1.1&hash=f07bcd&locator=deepseek-harness-desktop%40workspace%3A."
+  resolution: "fs-ext@patch:fs-ext@npm%3A2.1.1#./patches/fs-ext@2.1.1.patch::version=2.1.1&hash=e0cae7&locator=deepseek-harness-desktop%40workspace%3A."
   dependencies:
     nan: "npm:^2.21.0"
     node-gyp: "npm:latest"
-  checksum: 10c0/670419f1e4050d68fff63ac40c95a11b81b56eee902622cdbe3c087df410cd5a9652530d15f0bab7792bb32a11b3546ac9a7dc1a68acc2fb2a7d01165a55106d
+  checksum: 10c0/add7f27a1d3b1c6e4c613acb19b139b90955adc86939b7214a6f2eec5ca1c5c9231822a23e2228aff1eee5f3a66d7ea3fd3cd8f6c5b498cdf81e1a80b7fc611d
   languageName: node
   linkType: hard
 

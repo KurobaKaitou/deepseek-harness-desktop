@@ -173,11 +173,6 @@ export const REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES = [
   'node_modules/node-pty/prebuilds/win32-x64/conpty/conpty.dll',
 ] as const
 
-/** ABI-pinned fs-ext binding required by Electron 43 on Windows x64. */
-export const REQUIRED_WINDOWS_X64_FS_EXT_ENTRIES = [
-  'node_modules/fs-ext/prebuilds/win32-x64/electron.abi148.node',
-] as const
-
 /** ABI-pinned fs-ext bindings selected by non-universal macOS and Linux packages. */
 export const REQUIRED_POSIX_FS_EXT_ENTRIES = {
   darwin: {
@@ -751,7 +746,6 @@ export function verifyPackagedRuntime(
     ? [
         ...desktopPhysicalEntries,
         ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
-        ...REQUIRED_WINDOWS_X64_FS_EXT_ENTRIES,
       ]
     : context.electronPlatformName === 'darwin' && context.arch === 4
       ? [...desktopPhysicalEntries, ...REQUIRED_MACOS_UNIVERSAL_ENTRIES]

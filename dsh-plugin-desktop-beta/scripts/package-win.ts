@@ -34,7 +34,7 @@ export interface WindowsPackageOptions {
   readonly commandShell: string
   /** Absolute electron-builder CLI module. */
   readonly builderCli: string
-  /** Compile the fs-ext binding for the packaged Electron runtime. */
+  /** Prepare platform-specific native runtime dependencies before packaging. */
   readonly prepareRuntime: () => void
   /** Absolute packaged-installer verification script. */
   readonly verifier: string

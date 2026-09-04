@@ -1,4 +1,4 @@
-/** Build an Electron-ABI fs-ext binding without replacing the Node-ABI binding. */
+/** Prepare an Electron-ABI fs-ext binding where the packaged runtime requires one. */
 
 import { spawnSync } from 'node:child_process'
 import {
@@ -58,12 +58,22 @@ export interface PrepareFsExtOptions {
 }
 
 export interface PreparedFsExtBinding {
+  readonly status: 'prepared'
   readonly path: string
   readonly platform: NodeJS.Platform
   readonly arch: 'arm64' | 'x64'
   readonly electronVersion: string
   readonly abi: string
 }
+
+/** Windows uses the JSONL backend's named-semaphore path and never calls fs-ext. */
+export interface FsExtNotRequired {
+  readonly status: 'not-required'
+  readonly platform: 'win32'
+  readonly arch: 'arm64' | 'x64'
+}
+
+export type PrepareFsExtResult = PreparedFsExtBinding | FsExtNotRequired
 
 interface InstalledFsExtInputs {
   readonly fsExtRoot: string
@@ -191,11 +201,19 @@ function runNativeBuild(invocation: NativeBuildInvocation): void {
  */
 export function prepareFsExtForElectron(
   options: PrepareFsExtOptions = {},
-): PreparedFsExtBinding {
+): PrepareFsExtResult {
   const platform = options.platform ?? process.platform
   const hostPlatform = options.hostPlatform ?? process.platform
   const arch = normalizeArchitecture(options.arch ?? process.arch)
   assertTargetPlatform(platform, hostPlatform)
+
+  if (platform === 'win32') {
+    options.log?.(
+      `fs-ext Electron binding is not required on Windows (${platform}-${arch}); `
+      + 'the session backend uses a native named semaphore.',
+    )
+    return { status: 'not-required', platform, arch }
+  }
 
   const installed = resolveInstalledInputs(options)
   const installedVersion = readPackageVersion(installed.fsExtRoot, 'fs-ext')
@@ -255,6 +273,7 @@ export function prepareFsExtForElectron(
       + `(${platform}-${arch}, ABI ${abi}): ${destination}`,
     )
     return {
+      status: 'prepared',
       path: destination,
       platform,
       arch,

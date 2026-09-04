@@ -13,6 +13,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
 
@@ -1107,20 +1108,58 @@ describe('published package surface', () => {
     expect(lockfile).not.toContain('@koromix/koffi-win32-x64@npm:3.1.4')
   })
 
-  it('keeps Node and Electron fs-ext ABIs isolated for the alpha session backend', () => {
+  it('loads fs-ext only for POSIX session locks and skips its Windows install build', () => {
     const patchPath = './patches/fs-ext@2.1.1.patch'
     const patchResolution = `patch:fs-ext@npm%3A2.1.1#${patchPath}`
+    const sessionPatchPath = './patches/dsh-session-persistence-jsonl@0.1.3-alpha.1.patch'
+    const sessionPatchResolution = 'patch:@deepseek-ai/dsh-session-persistence-jsonl@file%3A'
+      + 'vendor/dsh-runtime/0.1.3-alpha.1/'
+      + `deepseek-ai-dsh-session-persistence-jsonl-0.1.3-alpha.1.tgz#${sessionPatchPath}`
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
     const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
+    const sessionPatch = readFileSync(new URL(sessionPatchPath, workspaceRoot), 'utf8')
+    const workspaceRequire = createRequire(new URL('package.json', packageRoot))
+    const fsExtManifestPath = workspaceRequire.resolve('fs-ext/package.json')
+    const installedFsExtManifest = JSON.parse(readFileSync(fsExtManifestPath, 'utf8')) as {
+      scripts?: { install?: unknown }
+    }
+    const installedFsExtInstall = readFileSync(join(dirname(fsExtManifestPath), 'install.js'), 'utf8')
+    const sessionManifestPath = workspaceRequire.resolve(
+      '@deepseek-ai/dsh-session-persistence-jsonl/package.json',
+    )
+    const installedSessionRuntime = readFileSync(
+      join(dirname(sessionManifestPath), 'lib/index.js'),
+      'utf8',
+    )
 
     expect(manifest.dependencies?.['fs-ext']).toBe('2.1.1')
     expect(manifest.devDependencies?.['node-gyp']).toBe('13.0.1')
     expect(workspaceManifest.resolutions).toMatchObject({
       'fs-ext@npm:2.1.1': patchResolution,
+      '@deepseek-ai/dsh-session-persistence-jsonl@npm:0.1.3-alpha.1': sessionPatchResolution,
+      '@deepseek-ai/dsh-session-persistence-jsonl@npm:^0.1.3-alpha.1': sessionPatchResolution,
     })
     expect(lockfile).toContain('fs-ext@patch:fs-ext@npm%3A2.1.1#./patches/fs-ext@2.1.1.patch')
+    expect(lockfile).toContain(sessionPatchPath)
     expect(patch).toContain("if (process.versions.electron)")
     expect(patch).toContain("'/electron.abi' + process.versions.modules + '.node'")
+    expect(patch).toContain('+if (process.platform !== "win32")')
+    expect(patch).toContain('+    "install": "node install.js"')
+    expect(installedFsExtManifest.scripts?.install).toBe('node install.js')
+    expect(installedFsExtInstall).toContain('if (process.platform !== "win32")')
+    expect(installedFsExtInstall).toContain('require.resolve("node-gyp/bin/node-gyp.js")')
+    let windowsInstallRequiredModule = false
+    runInNewContext(installedFsExtInstall, {
+      process: { platform: 'win32' },
+      require: () => {
+        windowsInstallRequiredModule = true
+        throw new Error('Windows fs-ext install must not resolve node-gyp')
+      },
+    })
+    expect(windowsInstallRequiredModule).toBe(false)
+    expect(sessionPatch).toContain('+\tconst { flock } = await import("fs-ext");')
+    expect(installedSessionRuntime).not.toContain('import { flock } from "fs-ext";')
+    expect(installedSessionRuntime).toContain('const { flock } = await import("fs-ext");')
   })
 
   it('hides official plugin-manager and general subprocess consoles on Windows', () => {

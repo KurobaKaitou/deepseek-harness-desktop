@@ -35,8 +35,16 @@ assert(
 assert(existsSync(rgPath), `cannot find ripgrep at ${rgPath}`)
 const rgVersion = execFileSync(rgPath, ['--version'], { encoding: 'utf8', windowsHide: true })
 assert(/^ripgrep\s/u.test(rgVersion), `received an invalid ripgrep version: ${JSON.stringify(rgVersion.trim())}`)
-const fsExt = createRequire(installAnchor)('fs-ext') as { flockSync?: unknown }
-assert(typeof fsExt.flockSync === 'function', 'did not load the Electron ABI fs-ext binding')
+if (process.platform === 'win32') {
+  const sessionBackend = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+  assert(
+    typeof sessionBackend.default === 'function',
+    'could not import the Windows JSONL session backend without fs-ext',
+  )
+} else {
+  const fsExt = createRequire(installAnchor)('fs-ext') as { flockSync?: unknown }
+  assert(typeof fsExt.flockSync === 'function', 'did not load the Electron ABI fs-ext binding')
+}
 
 /** Exercise the production Worker entry through Electron's logical ASAR path. */
 async function smokeDiagnosticExportWorker(): Promise<void> {
