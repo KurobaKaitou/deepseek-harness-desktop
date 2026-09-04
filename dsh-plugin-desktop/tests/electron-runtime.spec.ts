@@ -1967,7 +1967,7 @@ describe('Electron desktop runtime', () => {
     await release()
   })
 
-  it('starts the downloaded Windows installer before requesting orderly exit', async () => {
+  it('starts the downloaded Windows installer visibly before requesting orderly exit', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
     updater.download.mockResolvedValueOnce('C:\\Updates\\DSH-Desktop-2.1.0-windows.exe')
     const requestQuit = vi.fn()
@@ -1988,7 +1988,7 @@ describe('Electron desktop runtime', () => {
         detached: true,
         stdio: 'ignore',
         shell: false,
-        windowsHide: true,
+        windowsHide: false,
       },
     )
     expect(requestQuit).not.toHaveBeenCalled()
