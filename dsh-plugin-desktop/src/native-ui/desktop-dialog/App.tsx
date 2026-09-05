@@ -95,7 +95,9 @@ export function DesktopDialogApp(): JSX.Element {
             ? <ScrollArea className="mt-3 h-64 rounded-lg border bg-muted/40">
                 <pre className="select-text whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed text-muted-foreground" id="desktop-dialog-detail">{state.detail}</pre>
               </ScrollArea>
-            : <p className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground" id="desktop-dialog-detail">{state.detail}</p>}
+            : <ScrollArea className="mt-2 h-28 pr-3">
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground" id="desktop-dialog-detail">{state.detail}</p>
+              </ScrollArea>}
         {state.advisory === undefined ? null : <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm leading-relaxed text-amber-100" id="desktop-dialog-advisory">
           {desktopDialogAdvisoryLines(state.advisory).map((line, index) => <span className="block" key={`${String(index)}:${line}`}>{line}</span>)}
         </div>}
