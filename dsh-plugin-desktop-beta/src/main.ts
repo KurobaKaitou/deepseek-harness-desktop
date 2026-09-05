@@ -21,7 +21,10 @@ import {
 } from '@deepseek-ai/dsh-launch-environment'
 import type {} from '@deepseek-ai/dsh-web-app'
 import type {} from '@deepseek-ai/dsh-client-connection'
-import { isDesktopInstallerQuitRequest } from './desktop-installer-quit.ts'
+import {
+  isDesktopBackgroundNodeRequest,
+  isDesktopInstallerQuitRequest,
+} from './desktop-installer-quit.ts'
 import { createDesktopBrowserAccess } from './desktop-browser-access.ts'
 import {
   installDesktopDshRuntime,
@@ -630,6 +633,9 @@ async function start(): Promise<void> {
   app.on('second-instance', (_event, argv) => {
     if (isDesktopInstallerQuitRequest(argv, process.platform)) {
       requestQuit(0)
+      return
+    }
+    if (isDesktopBackgroundNodeRequest(argv)) {
       return
     }
     if (!showPreHostSurface()) runtime.show()

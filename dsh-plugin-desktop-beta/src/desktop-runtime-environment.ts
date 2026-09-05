@@ -53,7 +53,7 @@ export interface DesktopPnpmRuntimeInstallation {
   nodeBinDir: string
   /** Private Node command shim used by pnpm lifecycle scripts. */
   nodeShimPath: string
-  /** Preloaded module that removes Electron RunAsNode from child environments. */
+  /** Preloaded module that preserves the platform's safe Node descendant identity. */
   clearEnvironmentPath: string
   /** Remove this installation's PATH entry without deleting persistent generated files. */
   dispose(): void
@@ -335,9 +335,16 @@ function installRuntimeGeneration(stateDir: string, plan: RuntimeGenerationPlan)
   return { root, obsoletePathDirectories }
 }
 
-/** Module preloaded into RunAsNode children before their requested entry. */
-function clearEnvironmentModule(): string {
+/** Keep descendants in Node mode on Windows, where the private shim is a non-executable batch file. */
+function clearEnvironmentModule(platform: NodeJS.Platform): string {
+  if (platform === 'win32') {
+    return [
+      '// process.execPath is the Electron executable; its Node descendants must retain RunAsNode.',
+      '',
+    ].join('\n')
+  }
   return [
+    `process.execPath = require('node:path').join(__dirname, 'node-bin', 'node')`,
     `for (const name of Object.keys(process.env)) {`,
     `  if (name.toUpperCase() === '${RUN_AS_NODE}') delete process.env[name]`,
     '}',
@@ -563,7 +570,7 @@ export function installDesktopPnpmRuntime(options: DesktopPnpmRuntimeOptions): D
     [
       {
         relativePath: 'private/clear-env.cjs',
-        contents: clearEnvironmentModule(),
+        contents: clearEnvironmentModule(options.platform),
         mode: PRIVATE_FILE_MODE,
       },
       {

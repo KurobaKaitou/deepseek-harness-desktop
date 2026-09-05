@@ -11,9 +11,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { syncBuiltinESMExports } from 'node:module'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, delimiter as pathDelimiter, dirname, join } from 'node:path'
+import { basename, delimiter as pathDelimiter, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -101,9 +101,9 @@ describe('desktop Host pnpm runtime', () => {
     expect(node).toContain(`ELECTRON_RUN_AS_NODE=1 exec`)
     expect(node).toContain('--require "$runtime_clear_environment" "$@"')
     expect(node).not.toContain('npm_config_')
-    expect(readFileSync(installation.clearEnvironmentPath, 'utf8')).toContain(
-      "name.toUpperCase() === 'ELECTRON_RUN_AS_NODE'",
-    )
+    const clearEnvironment = readFileSync(installation.clearEnvironmentPath, 'utf8')
+    expect(clearEnvironment).toContain("process.execPath = require('node:path').join(__dirname, 'node-bin', 'node')")
+    expect(clearEnvironment).toContain("name.toUpperCase() === 'ELECTRON_RUN_AS_NODE'")
 
     expect(environment).toEqual({
       ...original,
@@ -136,14 +136,14 @@ describe('desktop Host pnpm runtime', () => {
     expect(environment).toEqual(original)
   })
 
-  it('clears every RunAsNode casing before the requested Node entry executes', () => {
+  it('publishes the POSIX shim as process.execPath and clears every RunAsNode casing', () => {
     const stateDir = join(temporaryDirectory(), 'runtime')
     const installation = installDesktopPnpmRuntime(options(stateDir, 'linux', { PATH: '/usr/bin' }))
     const result = spawnSync(process.execPath, [
       '--import',
       pathToFileURL(installation.clearEnvironmentPath).href,
       '-e',
-      'process.stdout.write(JSON.stringify(Object.keys(process.env).filter(name => name.toUpperCase() === "ELECTRON_RUN_AS_NODE")))',
+      'process.stdout.write(JSON.stringify({ execPath: process.execPath, runAsNode: Object.keys(process.env).filter(name => name.toUpperCase() === "ELECTRON_RUN_AS_NODE") }))',
     ], {
       encoding: 'utf8',
       env: {
@@ -155,7 +155,10 @@ describe('desktop Host pnpm runtime', () => {
 
     expect(result.error).toBeUndefined()
     expect(result.status).toBe(0)
-    expect(result.stdout).toBe('[]')
+    expect(JSON.parse(result.stdout)).toEqual({
+      execPath: installation.nodeShimPath,
+      runAsNode: [],
+    })
     installation.dispose()
   })
 
@@ -200,19 +203,81 @@ describe('desktop Host pnpm runtime', () => {
 
     expect(result.error).toBeUndefined()
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
-    expect(JSON.parse(readFileSync(captureOutput, 'utf8'))).toEqual({
+    const capture = JSON.parse(readFileSync(captureOutput, 'utf8')) as Record<string, unknown>
+    expect(capture).toMatchObject({
       ignoresMinimumReleaseAge: true,
-      runAsNode: [],
+      runAsNode: process.platform === 'win32' ? ['ELECTRON_RUN_AS_NODE'] : [],
       runtime: 'electron',
       target: '43.4.0',
       disturl: 'https://electronjs.org/headers',
-      node: installation.nodeShimPath,
-      path: `${installation.nodeBinDir}${pathDelimiter}${environment.PATH ?? ''}`,
     })
+    expect(resolve(String(capture.node))).toBe(resolve(installation.nodeShimPath))
+    const [capturedNodeBinDir, ...capturedPath] = String(capture.path).split(pathDelimiter)
+    expect(resolve(capturedNodeBinDir ?? '')).toBe(resolve(installation.nodeBinDir))
+    expect(capturedPath.join(pathDelimiter)).toBe(environment.PATH ?? '')
     expect(environment).not.toHaveProperty('ELECTRON_RUN_AS_NODE')
     expect(environment).not.toHaveProperty('npm_config_runtime')
     installation.dispose()
   })
+
+  it.runIf(process.platform === 'win32')(
+    'keeps process.execPath descendants in Electron Node mode on Windows',
+    () => {
+      const root = temporaryDirectory()
+      const childEntry = join(root, 'child.mjs')
+      const parentEntry = join(root, 'parent.mjs')
+      const output = join(root, 'result.json')
+      const electronExecutable = createRequire(import.meta.url)('electron') as string
+      writeFileSync(childEntry, [
+        "process.stdout.write('child-stdout')",
+        "process.stderr.write('child-stderr')",
+        'process.exitCode = 23',
+        '',
+      ].join('\n'))
+      writeFileSync(parentEntry, [
+        "import { spawnSync } from 'node:child_process'",
+        "import { writeFileSync } from 'node:fs'",
+        'const [childEntry, output] = process.argv.slice(2)',
+        "const child = spawnSync(process.execPath, [childEntry], { encoding: 'utf8', windowsHide: true })",
+        'writeFileSync(output, JSON.stringify({',
+        '  execPath: process.execPath,',
+        "  runAsNode: Object.keys(process.env).filter(name => name.toUpperCase() === 'ELECTRON_RUN_AS_NODE'),",
+        '  child: { status: child.status, stdout: child.stdout, stderr: child.stderr },',
+        '}))',
+        '',
+      ].join('\n'))
+      const installation = installDesktopPnpmRuntime({
+        ...options(join(root, 'runtime'), 'win32', { Path: process.env.Path }),
+        appExecutable: electronExecutable,
+        pnpmBinPath: parentEntry,
+      })
+
+      const result = spawnSync(electronExecutable, [
+        '--require',
+        installation.clearEnvironmentPath,
+        parentEntry,
+        childEntry,
+        output,
+      ], {
+        encoding: 'utf8',
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        timeout: 30_000,
+        windowsHide: true,
+      })
+
+      expect(result.error).toBeUndefined()
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+      const capture = JSON.parse(readFileSync(output, 'utf8')) as Record<string, unknown>
+      expect(resolve(String(capture.execPath))).toBe(resolve(electronExecutable))
+      expect(capture.runAsNode).toEqual(['ELECTRON_RUN_AS_NODE'])
+      expect(capture.child).toEqual({
+        status: 23,
+        stdout: 'child-stdout',
+        stderr: 'child-stderr',
+      })
+      installation.dispose()
+    },
+  )
 
   it('creates Windows batch shims without publishing the private Node directory', () => {
     const stateDir = join(temporaryDirectory(), 'runtime-state')
@@ -243,6 +308,9 @@ describe('desktop Host pnpm runtime', () => {
     expect(node).toContain('set "ELECTRON_RUN_AS_NODE=1"')
     expect(node).toContain('--require "%DSH_RUNTIME_PRIVATE%\\clear-env.cjs" %*')
     expect(node).not.toContain('npm_config_')
+    expect(readFileSync(installation.clearEnvironmentPath, 'utf8')).not.toContain(
+      "name.toUpperCase() === 'ELECTRON_RUN_AS_NODE'",
+    )
 
     expect(environment).toEqual({
       Path: `${installation.pathDir};C:\\Windows\\System32;C:\\Windows`,
