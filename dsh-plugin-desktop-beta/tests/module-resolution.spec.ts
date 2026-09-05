@@ -360,6 +360,30 @@ describe('installProfilePackageResolver', () => {
     expect(harness.resolve?.('profile-peer', { parentURL: localDependencyUrl }, nextResolve)).toEqual({ url: profilePeerUrl })
   })
 
+  it('allows linked Profile modules to resolve dependencies from shared Profile node_modules', () => {
+    const profileBaseUrl = 'file:///tmp/dsh/profiles/desktop/package.json'
+    const linkedPluginUrl = 'file:///tmp/dsh/linked-plugins/plugin/index.js'
+    const sharedDependencyUrl = 'file:///tmp/dsh/profiles/node_modules/profile-peer/index.js'
+    installProfilePackageResolver(profileBaseUrl)
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => {
+      if (specifier === 'plugin' && context.parentURL === profileBaseUrl) return { url: linkedPluginUrl }
+      if (specifier === 'profile-peer' && context.parentURL === linkedPluginUrl) {
+        // Node's default resolver may mutate the hook context before reporting
+        // a miss. The resolver must retain the original linked-module owner.
+        context.parentURL = profileBaseUrl
+        throw missing(specifier, context.parentURL)
+      }
+      if (specifier === 'profile-peer' && context.parentURL === profileBaseUrl) return { url: sharedDependencyUrl }
+      throw missing(specifier, context.parentURL)
+    })
+    const loaderEntryUrl = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
+
+    expect(harness.resolve?.('plugin', { parentURL: loaderEntryUrl }, nextResolve))
+      .toEqual({ url: linkedPluginUrl })
+    expect(harness.resolve?.('profile-peer', { parentURL: linkedPluginUrl }, nextResolve))
+      .toEqual({ url: sharedDependencyUrl })
+  })
+
   it('allows a Desktop-selected package to use a missing dependency from the Profile overlay', () => {
     const profileBaseUrl = 'file:///C:/Users/test/profile/package.json'
     const desktopPluginUrl = 'file:///Applications/DSH.app/Contents/Resources/app.asar/node_modules/plugin/index.js'

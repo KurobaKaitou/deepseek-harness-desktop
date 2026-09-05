@@ -257,6 +257,22 @@ function requiredWebPatchReload(): ProfilePatchReload {
   return template.patchReload
 }
 
+/**
+ * Resolve an official bundle from this Desktop installation before consulting
+ * the shared Profile. Stable and Beta can share a DSH home, but their bundled
+ * DSH releases are intentionally different; letting a newer Profile copy of
+ * `dsh-web-app` override Stable makes its patch request packages Stable does
+ * not ship (for example, `dsh-client-file-upload`).
+ */
+function resolveRequiredBundle(
+  packageName: string,
+  options: Parameters<typeof resolveOverlayPackage>[1],
+) {
+  const selection = resolveOverlayPackage(packageName, options)
+  if (!REQUIRED_BUNDLE_SET.has(packageName) || selection.install === undefined) return selection
+  return { ...selection, selected: selection.install }
+}
+
 /** Prepared profile inputs consumed by app-boot. */
 export interface PreparedDesktopProfile {
   /** Harness home shared by the launcher and generated command environment. */
@@ -520,7 +536,7 @@ function loadRecoveryFilteredProfile(
     const isDshMarket = packageName === DESKTOP_MARKET_IDENTITIES.dshMarket.packageName
     if (!isDshMarket && desktopPluginBundleMutable(packageName) && disabledBundles.has(packageName)) continue
     try {
-      const packageDir = resolveOverlayPackage(packageName, {
+      const packageDir = resolveRequiredBundle(packageName, {
         installPackageUrl,
         profilePackageUrl,
       }).selected.packageDir

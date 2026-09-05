@@ -206,6 +206,36 @@ function isObsoleteProfileFallbackPath(
   return isAsarPath(candidate) || isSharedFallbackPath(registration, candidate)
 }
 
+function isLinkedProfileModule(
+  registration: ProfileResolverRegistration,
+  parentURL: string | undefined,
+): boolean {
+  const candidate = filePath(parentURL)
+  return candidate !== undefined
+    && !isWithin(registration, registration.profileDirectory, candidate)
+}
+
+function canUseProfileSharedDependency(
+  registration: ProfileResolverRegistration,
+  parentURL: string | undefined,
+  candidate: string,
+): boolean {
+  // A linked Profile plugin may keep dependencies in the Profile-level
+  // node_modules directory. That location is obsolete only when selected as
+  // an overlay root, not when it is a dependency of a linked plugin.
+  return isLinkedProfileModule(registration, parentURL)
+    && isSharedFallbackPath(registration, candidate)
+}
+
+function canUseProfileSharedDependencyUrl(
+  registration: ProfileResolverRegistration,
+  parentURL: string | undefined,
+  candidate: string,
+): boolean {
+  const path = filePath(candidate)
+  return path !== undefined && canUseProfileSharedDependency(registration, parentURL, path)
+}
+
 function isPackageLocalSpecifier(specifier: string): boolean {
   return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('\\')
     || specifier.startsWith('#')
@@ -469,7 +499,10 @@ function resolveFilenameWithState(
   }
   try {
     const resolved = resolveCommonJsNormally(state, thisArg, request, parent, isMain, options)
-    if (parentSource === 'install' || !isObsoleteProfileFallbackPath(registration, resolved)) {
+    if (parentSource === 'install'
+      || !isObsoleteProfileFallbackPath(registration, resolved)
+      || (parentSource === 'profile'
+        && canUseProfileSharedDependency(registration, parentURL, resolved))) {
       track(registration, pathToFileURL(resolved).href, parentSource)
       return resolved
     }
@@ -478,7 +511,9 @@ function resolveFilenameWithState(
   }
   try {
     const resolved = resolveCommonJsFromAnchor(state, registration, request, 'profile')
-    if (!isObsoleteProfileFallbackPath(registration, resolved)) {
+    if (!isObsoleteProfileFallbackPath(registration, resolved)
+      || (parentSource === 'profile'
+        && canUseProfileSharedDependency(registration, parentURL, resolved))) {
       track(registration, pathToFileURL(resolved).href, 'profile')
       return resolved
     }
@@ -498,6 +533,9 @@ function resolveForRegistration(
   nextResolve: Parameters<ResolveHookSync>[2],
 ): ReturnType<ResolveHookSync> {
   const { registration, boundary, source: parentSource } = parentRegistration
+  // Node may mutate the hook context while delegating to its default resolver;
+  // retain the original module owner for Profile shared-dependency policy.
+  const parentURL = context.parentURL
   const packageName = boundary ? resolvablePackageName(specifier) : undefined
   if (packageName !== undefined) {
     const selected = selectedOverlayCandidate(registration, packageName)
@@ -522,7 +560,10 @@ function resolveForRegistration(
 
   try {
     const resolved = nextResolve(specifier, context)
-    if (parentSource === 'install' || !isObsoleteProfileFallbackUrl(registration, resolved.url)) {
+    if (parentSource === 'install'
+      || !isObsoleteProfileFallbackUrl(registration, resolved.url)
+      || (parentSource === 'profile'
+        && canUseProfileSharedDependencyUrl(registration, parentURL, resolved.url))) {
       track(registration, resolved.url, parentSource)
       return resolved
     }
@@ -532,7 +573,9 @@ function resolveForRegistration(
 
   try {
     const resolved = resolveFromAnchor(state, registration, specifier, 'profile', context, nextResolve)
-    if (!isObsoleteProfileFallbackUrl(registration, resolved.url)) {
+    if (!isObsoleteProfileFallbackUrl(registration, resolved.url)
+      || (parentSource === 'profile'
+        && canUseProfileSharedDependencyUrl(registration, parentURL, resolved.url))) {
       track(registration, resolved.url, 'profile')
       return resolved
     }

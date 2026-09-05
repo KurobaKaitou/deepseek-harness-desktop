@@ -195,6 +195,39 @@ describe('desktop profile composition', {
     ])
   })
 
+  it('keeps Stable core bundles in the Desktop installation when a shared Profile is newer', () => {
+    const home = temporaryHome()
+    const profileDir = ensureDesktopProfile(home)
+    installBundle(
+      home,
+      '@deepseek-ai/dsh-web-app',
+      [
+        '- insert:',
+        '    - id: newer-profile-web',
+        '      name: newer-profile-web',
+        '',
+      ].join('\n'),
+      '99.0.0',
+    )
+    const manifestPath = join(profileDir, 'package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>
+    writeFileSync(manifestPath, JSON.stringify({
+      ...manifest,
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
+    }) + '\n')
+
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const webLayer = prepared.profile.layers.find(layer => layer.packageName === '@deepseek-ai/dsh-web-app')
+
+    expect(webLayer).toBeDefined()
+    expect(webLayer?.packageDir).not.toBe(join(
+      profileDir,
+      'node_modules',
+      '@deepseek-ai',
+      'dsh-web-app',
+    ))
+  })
+
   it('repairs a base-only CLI profile without replacing dependencies', () => {
     const home = temporaryHome()
     const dir = ensureDesktopProfile(home)
