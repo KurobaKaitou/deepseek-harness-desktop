@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const harness = vi.hoisted(() => {
+  const realpathNative = vi.fn((candidate: string) => candidate)
+  const realpathSync = Object.assign(
+    vi.fn((candidate: string) => realpathNative(candidate)),
+    { native: realpathNative },
+  )
   const cjsOriginal = vi.fn((
     request: string,
     _parent?: { filename?: string } | null,
@@ -44,6 +49,8 @@ const harness = vi.hoisted(() => {
     registerHooks,
     cjsOriginal,
     cjsModule: { _resolveFilename: cjsOriginal },
+    realpathNative,
+    realpathSync,
   }
 })
 
@@ -51,6 +58,11 @@ vi.mock('node:module', async (importOriginal) => ({
   ...await importOriginal<typeof import('node:module')>(),
   default: harness.cjsModule,
   registerHooks: harness.registerHooks,
+}))
+
+vi.mock('node:fs', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:fs')>(),
+  realpathSync: harness.realpathSync,
 }))
 
 vi.mock('../src/package-overlay.ts', () => ({
@@ -90,6 +102,9 @@ describe('installProfilePackageResolver', () => {
     harness.registerHooks.mockClear()
     harness.cjsOriginal.mockClear()
     harness.cjsModule._resolveFilename = harness.cjsOriginal
+    harness.realpathNative.mockReset()
+    harness.realpathNative.mockImplementation((candidate: string) => candidate)
+    harness.realpathSync.mockClear()
   })
 
   afterEach(() => {
@@ -122,6 +137,42 @@ describe('installProfilePackageResolver', () => {
     })
     expect(harness.overlay).toHaveBeenCalledWith('@deepseek-ai/dsh-web-app', expect.any(Object))
     expect(harness.overlay).toHaveBeenCalledWith('dsh-plugin-desktop', expect.any(Object))
+  })
+
+  it('caches one overlay selection per Profile generation and package root', () => {
+    const profileBaseUrl = 'file:///C:/Users/test/profile/package.json'
+    harness.sources.set('plugin', 'install')
+    installProfilePackageResolver(profileBaseUrl)
+    const nextResolve = vi.fn((specifier: string) => ({
+      url: `file:///C:/Program%20Files/DSH/resources/app.asar/node_modules/plugin/${specifier.endsWith('/feature') ? 'feature.js' : 'index.js'}`,
+    }))
+    const loaderEntryUrl = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
+
+    harness.resolve?.('plugin', { parentURL: loaderEntryUrl }, nextResolve)
+    harness.resolve?.('plugin/feature', { parentURL: loaderEntryUrl }, nextResolve)
+
+    expect(harness.overlay).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes overlay selection when a new HMR generation retains the Profile', () => {
+    const profileBaseUrl = 'file:///C:/Users/test/profile/package.json'
+    harness.sources.set('plugin', 'install')
+    installProfilePackageResolver(profileBaseUrl)
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => ({
+      url: `file:///resolved/${specifier}.js`,
+      context,
+    }))
+    const loaderEntryUrl = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
+    harness.resolve?.('plugin', { parentURL: loaderEntryUrl }, nextResolve)
+
+    harness.sources.set('plugin', 'profile')
+    installProfilePackageResolver(profileBaseUrl)
+    const refreshed = harness.resolve?.('plugin/feature', { parentURL: loaderEntryUrl }, nextResolve) as {
+      context: { parentURL?: string }
+    }
+
+    expect(harness.overlay).toHaveBeenCalledTimes(2)
+    expect(refreshed.context.parentURL).toBe(profileBaseUrl)
   })
 
   it('also recognizes the Loader native dynamic-import fallback', () => {
@@ -169,7 +220,122 @@ describe('installProfilePackageResolver', () => {
       specifier: 'cordis:include',
       context: { parentURL: loaderEntryUrl },
     })
+    expect(harness.resolve?.('\\\\server\\share\\plugin.cjs', { parentURL: loaderEntryUrl }, nextResolve))
+      .toEqual({
+        specifier: '\\\\server\\share\\plugin.cjs',
+        context: { parentURL: loaderEntryUrl },
+      })
     expect(harness.overlay).not.toHaveBeenCalled()
+  })
+
+  it('keeps repeated Loader selection and the tracked ASAR graph off realpath', () => {
+    const profileBaseUrl = 'file:///C:/Users/test/profile/package.json'
+    const pluginUrl = 'file:///C:/Program%20Files/DSH/resources/app.asar/node_modules/plugin/index.js'
+    const featureUrl = 'file:///C:/Program%20Files/DSH/resources/app.asar/node_modules/plugin/feature.js'
+    const dependencyUrl = 'file:///C:/Program%20Files/DSH/resources/app.asar/node_modules/dependency/index.js'
+    harness.sources.set('plugin', 'install')
+    installProfilePackageResolver(profileBaseUrl)
+    harness.realpathNative.mockClear()
+    const loaderEntryUrl = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
+    const loadPlugin = vi.fn(() => ({ url: pluginUrl }))
+
+    expect(harness.resolve?.('plugin', { parentURL: loaderEntryUrl }, loadPlugin)).toEqual({ url: pluginUrl })
+    expect(harness.resolve?.('plugin/subpath', { parentURL: loaderEntryUrl }, loadPlugin)).toEqual({ url: pluginUrl })
+    expect(harness.overlay).toHaveBeenCalledTimes(1)
+
+    expect(harness.resolve?.('./feature.js', { parentURL: pluginUrl }, () => ({ url: featureUrl })))
+      .toEqual({ url: featureUrl })
+    expect(harness.resolve?.('dependency', { parentURL: featureUrl }, () => ({ url: dependencyUrl })))
+      .toEqual({ url: dependencyUrl })
+    expect(harness.resolve?.('node:path', { parentURL: dependencyUrl }, (specifier, context) => ({
+      url: specifier,
+      context,
+    }))).toEqual({ url: 'node:path', context: { parentURL: dependencyUrl } })
+    expect(harness.resolve?.(
+      './native.js',
+      { parentURL: 'file:///C:/Program%20Files/DSH/resources/app.asar.unpacked/lib/untracked.js' },
+      (specifier, context) => ({ specifier, context }),
+    )).toEqual({
+      specifier: './native.js',
+      context: {
+        parentURL: 'file:///C:/Program%20Files/DSH/resources/app.asar.unpacked/lib/untracked.js',
+      },
+    })
+    expect(harness.realpathNative).not.toHaveBeenCalled()
+  })
+
+  it('canonicalizes an aliased Profile boundary once and reuses the cached path', () => {
+    const profileDirectory = join(tmpdir(), 'dsh-real-profile')
+    const profileBaseUrl = pathToFileURL(join(profileDirectory, 'package.json')).href
+    const aliasConfig = join(tmpdir(), 'dsh-profile-alias', 'cordis.yml')
+    const canonicalConfig = join(profileDirectory, 'cordis.yml')
+    harness.sources.set('plugin', 'install')
+    installProfilePackageResolver(profileBaseUrl)
+    harness.realpathNative.mockClear()
+    harness.realpathNative.mockImplementation((candidate: string) => (
+      candidate === aliasConfig ? canonicalConfig : candidate
+    ))
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => ({ specifier, context }))
+
+    expect(harness.resolve?.('plugin', { parentURL: pathToFileURL(aliasConfig).href }, nextResolve))
+      .toEqual(expect.objectContaining({ specifier: 'plugin' }))
+    expect(harness.resolve?.('plugin/subpath', { parentURL: pathToFileURL(aliasConfig).href }, nextResolve))
+      .toEqual(expect.objectContaining({ specifier: 'plugin/subpath' }))
+    expect(harness.realpathNative).toHaveBeenCalledTimes(1)
+    expect(harness.realpathNative).toHaveBeenCalledWith(aliasConfig)
+    expect(harness.overlay).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not cache a failed canonical lookup before an aliased Profile file appears', () => {
+    const profileDirectory = join(tmpdir(), 'dsh-published-profile')
+    const profileBaseUrl = pathToFileURL(join(profileDirectory, 'package.json')).href
+    const aliasConfig = join(tmpdir(), 'dsh-pending-profile-alias', 'cordis.yml')
+    const canonicalConfig = join(profileDirectory, 'cordis.yml')
+    harness.sources.set('plugin', 'install')
+    installProfilePackageResolver(profileBaseUrl)
+    harness.realpathNative.mockClear()
+    let published = false
+    harness.realpathNative.mockImplementation((candidate: string) => {
+      if (candidate !== aliasConfig) return candidate
+      if (!published) throw Object.assign(new Error('not published'), { code: 'ENOENT' })
+      return canonicalConfig
+    })
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => ({ specifier, context }))
+    const parentURL = pathToFileURL(aliasConfig).href
+
+    expect(harness.resolve?.('plugin', { parentURL }, nextResolve))
+      .toEqual({ specifier: 'plugin', context: { parentURL } })
+    expect(harness.overlay).not.toHaveBeenCalled()
+
+    published = true
+    expect(harness.resolve?.('plugin', { parentURL }, nextResolve))
+      .toEqual(expect.objectContaining({ specifier: 'plugin' }))
+    expect(harness.realpathNative).toHaveBeenCalledTimes(2)
+    expect(harness.overlay).toHaveBeenCalledTimes(1)
+  })
+
+  it('tracks both alias and canonical URLs for a linked module graph', () => {
+    const profileBaseUrl = 'file:///C:/Users/test/profile/package.json'
+    const aliasPluginPath = join(tmpdir(), 'dsh-linked-alias', 'index.js')
+    const canonicalPluginPath = join(tmpdir(), 'dsh-linked-real', 'index.js')
+    const aliasPluginUrl = pathToFileURL(aliasPluginPath).href
+    const canonicalPluginUrl = pathToFileURL(canonicalPluginPath).href
+    const dependencyUrl = 'file:///C:/Users/test/profile/node_modules/profile-peer/index.js'
+    harness.sources.set('linked-plugin', 'install')
+    installProfilePackageResolver(profileBaseUrl)
+    harness.realpathNative.mockClear()
+    harness.realpathNative.mockImplementation((candidate: string) => (
+      candidate === aliasPluginPath ? canonicalPluginPath : candidate
+    ))
+    const loaderEntryUrl = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
+
+    expect(harness.resolve?.('linked-plugin', { parentURL: loaderEntryUrl }, () => ({ url: aliasPluginUrl })))
+      .toEqual({ url: aliasPluginUrl })
+    expect(harness.resolve?.('profile-peer', { parentURL: canonicalPluginUrl }, () => ({ url: dependencyUrl })))
+      .toEqual({ url: dependencyUrl })
+    expect(harness.realpathNative).toHaveBeenCalledTimes(2)
+    expect(harness.realpathNative).toHaveBeenNthCalledWith(1, aliasPluginPath)
+    expect(harness.realpathNative).toHaveBeenNthCalledWith(2, fileURLToPath(dependencyUrl))
   })
 
   it('keeps package-local dependencies and Profile fallback across linked relative modules', () => {
@@ -289,6 +455,82 @@ describe('installProfilePackageResolver', () => {
     )).toBe('ordinary:@deepseek-ai/dsh-client-modules/package.json')
   })
 
+  it('keeps the ESM hook in pass-through mode during explicit CommonJS resolution', () => {
+    const profileManifestPath = join(tmpdir(), 'dsh-profile-bypass', 'package.json')
+    const profileBaseUrl = pathToFileURL(profileManifestPath).href
+    const pluginPath = join(dirname(profileManifestPath), 'node_modules', 'profile-plugin', 'index.cjs')
+    const pluginUrl = pathToFileURL(pluginPath).href
+    const dependencyPath = join(dirname(profileManifestPath), 'node_modules', 'profile-dependency', 'index.cjs')
+    installProfilePackageResolver(profileBaseUrl)
+    const loaderEntryUrl = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
+    expect(harness.resolve?.(
+      'profile-plugin',
+      { parentURL: loaderEntryUrl },
+      () => ({ url: pluginUrl }),
+    )).toEqual({ url: pluginUrl })
+    harness.overlay.mockClear()
+    const nestedNextResolve = vi.fn(() => ({ url: pathToFileURL(dependencyPath).href }))
+    harness.cjsOriginal.mockImplementationOnce((request: string) => {
+      harness.resolve?.(request, { parentURL: profileBaseUrl }, nestedNextResolve)
+      return dependencyPath
+    })
+
+    expect(harness.cjsModule._resolveFilename(
+      'profile-dependency',
+      { filename: pluginPath },
+      false,
+    )).toBe(dependencyPath)
+    expect(nestedNextResolve).toHaveBeenCalledTimes(1)
+    expect(harness.overlay).not.toHaveBeenCalled()
+  })
+
+  it('propagates Profile ownership from a config boundary through a relative CommonJS child', () => {
+    const profileManifestPath = join(tmpdir(), 'dsh-profile-relative-cjs', 'package.json')
+    const helperPath = join(dirname(profileManifestPath), 'lib', 'helper.cjs')
+    const peerPath = join(dirname(profileManifestPath), 'node_modules', 'profile-peer', 'index.cjs')
+    installProfilePackageResolver(pathToFileURL(profileManifestPath).href)
+    harness.cjsOriginal.mockImplementation((request: string) => {
+      if (request === './helper.cjs') return helperPath
+      if (request === 'profile-peer') return peerPath
+      return `ordinary:${request}`
+    })
+
+    expect(harness.cjsModule._resolveFilename(
+      './helper.cjs',
+      { filename: profileManifestPath },
+      false,
+    )).toBe(helperPath)
+    expect(harness.cjsModule._resolveFilename(
+      'profile-peer',
+      { filename: helperPath },
+      false,
+    )).toBe(peerPath)
+    expect(harness.overlay).not.toHaveBeenCalled()
+  })
+
+  it('migrates a live v1 resolver state in place during HMR', () => {
+    const profileBaseUrl = 'file:///tmp/dsh/profiles/hmr/package.json'
+    installProfilePackageResolver(profileBaseUrl)
+    const symbol = Symbol.for('dsh-plugin-desktop.profile-package-resolver.v1')
+    const state = (globalThis as unknown as Record<PropertyKey, unknown>)[symbol] as {
+      registrations: Map<string, Record<string, unknown>>
+    }
+    const registration = state.registrations.get(profileBaseUrl)
+    if (registration === undefined) throw new Error('missing test resolver registration')
+    delete registration.canonicalPaths
+    delete registration.overlayCandidates
+    delete registration.activeSequences
+
+    expect(() => installProfilePackageResolver(profileBaseUrl)).not.toThrow()
+    const loaderEntryUrl = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => ({ specifier, context }))
+    expect(harness.resolve?.('plugin', { parentURL: loaderEntryUrl }, nextResolve)).toEqual({
+      specifier: 'plugin',
+      context: { parentURL: profileBaseUrl },
+    })
+    expect(harness.registerHooks).toHaveBeenCalledTimes(1)
+  })
+
   it('deregisters hooks only once even if the disposer is reused', () => {
     const dispose = installProfilePackageResolver('file:///C:/Users/test/profile/package.json')
     dispose()
@@ -327,6 +569,29 @@ describe('installProfilePackageResolver', () => {
     expect(harness.deregister).not.toHaveBeenCalled()
     first()
     expect(harness.deregister).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores the correct newest Profile after an A-B-A retain is released', () => {
+    const firstProfile = 'file:///tmp/dsh/profiles/first/package.json'
+    const secondProfile = 'file:///tmp/dsh/profiles/second/package.json'
+    const first = installProfilePackageResolver(firstProfile)
+    const second = installProfilePackageResolver(secondProfile)
+    const newestFirst = installProfilePackageResolver(firstProfile)
+    const loaderEntryUrl = import.meta.resolve('@deepseek-ai/cordis-plugin-loader')
+    const nextResolve = vi.fn((specifier: string, context: { parentURL?: string }) => ({ specifier, context }))
+
+    newestFirst()
+    expect(harness.resolve?.('plugin', { parentURL: loaderEntryUrl }, nextResolve)).toEqual({
+      specifier: 'plugin',
+      context: { parentURL: secondProfile },
+    })
+
+    second()
+    expect(harness.resolve?.('plugin', { parentURL: loaderEntryUrl }, nextResolve)).toEqual({
+      specifier: 'plugin',
+      context: { parentURL: firstProfile },
+    })
+    first()
   })
 
   it('requires a plain package.json file URL anchor', () => {

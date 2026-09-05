@@ -34,9 +34,18 @@ interface ProfileResolverRegistration {
   readonly profileDirectory: string
   readonly sharedFallbackDirectory: string
   readonly moduleSources: Map<string, ModuleSource>
+  readonly canonicalPaths: Map<string, string>
+  readonly overlayCandidates: Map<string, PackageOverlayCandidate>
+  readonly activeSequences: Set<number>
   readonly profileRequire: NodeJS.Require
   references: number
   sequence: number
+}
+
+interface ParentRegistration {
+  readonly registration: ProfileResolverRegistration
+  readonly boundary: boolean
+  readonly source?: ModuleSource
 }
 
 interface ProcessResolverState {
@@ -84,28 +93,48 @@ function filePath(url: string | undefined): string | undefined {
   }
 }
 
-function moduleKey(url: string): string {
-  const candidate = filePath(url)
-  if (candidate === undefined) return url
-  let canonical = candidate
-  try {
-    canonical = realpathSync.native(candidate)
-  } catch {
-    // A generated module can be observed immediately before publication.
-  }
-  const parsed = new URL(url)
-  const normalized = pathToFileURL(canonical)
-  normalized.search = parsed.search
-  normalized.hash = parsed.hash
-  return normalized.href
-}
-
-function canonicalPath(candidate: string): string {
+function resolvedRealPath(candidate: string): string | undefined {
   try {
     return realpathSync.native(candidate)
   } catch {
-    return candidate
+    return undefined
   }
+}
+
+function isAsarPath(candidate: string): boolean {
+  return /(^|[\\/])app\.asar(?:\.unpacked)?([\\/]|$)/iu.test(candidate)
+}
+
+function canonicalPath(registration: ProfileResolverRegistration, candidate: string): string {
+  // Electron already gives logical ASAR paths a stable identity. Calling
+  // realpathSync on every archived module crosses its virtual filesystem and
+  // made Host boot proportional to the complete module graph on Windows.
+  if (isAsarPath(candidate)) return candidate
+  const cached = registration.canonicalPaths.get(candidate)
+  if (cached !== undefined) return cached
+  const canonical = resolvedRealPath(candidate)
+  // Do not cache ENOENT. Generated modules and retargeted Profile symlinks can
+  // become valid later in the same process.
+  if (canonical !== undefined) registration.canonicalPaths.set(candidate, canonical)
+  return canonical ?? candidate
+}
+
+function refreshCanonicalProfilePath(registration: ProfileResolverRegistration): void {
+  registration.canonicalPaths.clear()
+  const canonical = resolvedRealPath(registration.profileDirectory)
+  if (canonical !== undefined) {
+    registration.canonicalPaths.set(registration.profileDirectory, canonical)
+  }
+}
+
+function canonicalModuleKey(registration: ProfileResolverRegistration, url: string): string {
+  const candidate = filePath(url)
+  if (candidate === undefined) return url
+  const parsed = new URL(url)
+  const normalized = pathToFileURL(canonicalPath(registration, candidate))
+  normalized.search = parsed.search
+  normalized.hash = parsed.hash
+  return normalized.href
 }
 
 function isLexicallyWithin(directory: string, candidate: string): boolean {
@@ -113,25 +142,44 @@ function isLexicallyWithin(directory: string, candidate: string): boolean {
   return offset === '' || (offset !== '..' && !offset.startsWith(`..${sep}`) && !isAbsolute(offset))
 }
 
-function isWithin(directory: string, candidate: string): boolean {
+function isWithin(
+  registration: ProfileResolverRegistration,
+  directory: string,
+  candidate: string,
+): boolean {
   return isLexicallyWithin(directory, candidate)
-    || isLexicallyWithin(canonicalPath(directory), canonicalPath(candidate))
+    || isLexicallyWithin(
+      canonicalPath(registration, directory),
+      canonicalPath(registration, candidate),
+    )
 }
 
-function isDirectProfileBoundary(registration: ProfileResolverRegistration, url: string | undefined): boolean {
+function isLexicalProfileBoundary(
+  registration: ProfileResolverRegistration,
+  url: string | undefined,
+): boolean {
   if (url === registration.profileBaseUrl) return true
   const candidate = filePath(url)
   if (candidate === undefined) return false
-  const profileDirectory = canonicalPath(registration.profileDirectory)
-  const offset = relative(profileDirectory, canonicalPath(candidate))
+  const offset = relative(registration.profileDirectory, candidate)
   // The native Loader has used the directory URL, package.json, and cordis
   // config files as its parentURL across supported Node releases. Restrict the
   // bridge to that directory and its direct files, never another Profile.
   return offset === '' || (!offset.includes(sep) && offset !== '..' && !isAbsolute(offset))
 }
 
+function isCanonicalProfileBoundary(
+  registration: ProfileResolverRegistration,
+  canonicalUrl: string,
+): boolean {
+  const candidate = filePath(canonicalUrl)
+  if (candidate === undefined) return false
+  const offset = relative(canonicalPath(registration, registration.profileDirectory), candidate)
+  return offset === '' || (!offset.includes(sep) && offset !== '..' && !isAbsolute(offset))
+}
+
 function isSharedFallbackPath(registration: ProfileResolverRegistration, candidate: string): boolean {
-  return isWithin(registration.sharedFallbackDirectory, candidate)
+  return isWithin(registration, registration.sharedFallbackDirectory, candidate)
 }
 
 function isSharedFallbackUrl(registration: ProfileResolverRegistration, url: string): boolean {
@@ -141,35 +189,38 @@ function isSharedFallbackUrl(registration: ProfileResolverRegistration, url: str
 
 function isLegacyDesktopInstallUrl(url: string): boolean {
   const candidate = filePath(url)
-  return candidate !== undefined && /(^|[\\/])app\.asar(?:\.unpacked)?([\\/]|$)/iu.test(candidate)
+  return candidate !== undefined && isAsarPath(candidate)
 }
 
 function isObsoleteProfileFallbackUrl(
   registration: ProfileResolverRegistration,
   url: string,
 ): boolean {
-  return isSharedFallbackUrl(registration, url) || isLegacyDesktopInstallUrl(url)
+  return isLegacyDesktopInstallUrl(url) || isSharedFallbackUrl(registration, url)
 }
 
 function isObsoleteProfileFallbackPath(
   registration: ProfileResolverRegistration,
   candidate: string,
 ): boolean {
-  return isSharedFallbackPath(registration, candidate)
-    || /(^|[\\/])app\.asar(?:\.unpacked)?([\\/]|$)/iu.test(candidate)
-}
-
-function isBarePackageSpecifier(specifier: string): boolean {
-  return !isBuiltin(specifier) && packageNameFromSpecifier(specifier) !== undefined
-}
-
-function resolvablePackageName(specifier: string): string | undefined {
-  return isBuiltin(specifier) ? undefined : packageNameFromSpecifier(specifier)
+  return isAsarPath(candidate) || isSharedFallbackPath(registration, candidate)
 }
 
 function isPackageLocalSpecifier(specifier: string): boolean {
-  return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('#')
+  return specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('\\')
+    || specifier.startsWith('#')
     || URL.canParse(specifier)
+}
+
+function isBarePackageSpecifier(specifier: string): boolean {
+  return !isBuiltin(specifier) && !isPackageLocalSpecifier(specifier)
+    && packageNameFromSpecifier(specifier) !== undefined
+}
+
+function resolvablePackageName(specifier: string): string | undefined {
+  return isBuiltin(specifier) || isPackageLocalSpecifier(specifier)
+    ? undefined
+    : packageNameFromSpecifier(specifier)
 }
 
 function isMissingModule(cause: unknown): boolean {
@@ -193,30 +244,91 @@ function newestRegistration(
 function registrationForParent(
   state: ProcessResolverState,
   parentURL: string | undefined,
-): ProfileResolverRegistration | undefined {
-  const exact = newestRegistration(state, registration => isDirectProfileBoundary(registration, parentURL))
-  if (exact !== undefined) return exact
-  const graph = newestRegistration(state, registration => (
-    parentURL !== undefined && registration.moduleSources.has(moduleKey(parentURL))
-  ))
-  if (graph !== undefined) return graph
+): ParentRegistration | undefined {
+  if (parentURL === LOADER_ENTRY_URL) {
+    const registration = newestRegistration(state, () => true)
+    return registration === undefined ? undefined : { registration, boundary: true }
+  }
+
+  if (parentURL === undefined) return undefined
+  const exact = state.registrations.get(parentURL)
+  if (exact !== undefined) {
+    return { registration: exact, boundary: true, source: 'profile' }
+  }
+
+  const boundary = newestRegistration(
+    state,
+    registration => isLexicalProfileBoundary(registration, parentURL),
+  )
+  if (boundary !== undefined) {
+    return { registration: boundary, boundary: true, source: 'profile' }
+  }
+
+  const graph = newestRegistration(state, registration => registration.moduleSources.has(parentURL))
+  if (graph !== undefined) {
+    return {
+      registration: graph,
+      boundary: false,
+      source: graph.moduleSources.get(parentURL)!,
+    }
+  }
+
+  // An untracked installation module must not gain access to Profile packages.
+  // More importantly, never realpath a logical ASAR URL: Electron has already
+  // supplied the stable identity and the archive lookup is the hot boot path.
+  if (isLegacyDesktopInstallUrl(parentURL)) return undefined
+
+  // Symlinked development Profiles need a canonical fallback, but it remains
+  // a cold path. Successful lookups are cached and promoted into the raw graph
+  // by track(); logical ASAR paths never reach this branch.
+  const canonicalParents = new Map<ProfileResolverRegistration, string>()
+  const canonicalParent = (registration: ProfileResolverRegistration): string => {
+    let key = canonicalParents.get(registration)
+    if (key === undefined) {
+      key = canonicalModuleKey(registration, parentURL)
+      canonicalParents.set(registration, key)
+    }
+    return key
+  }
+  const canonicalBoundary = newestRegistration(
+    state,
+    registration => isCanonicalProfileBoundary(registration, canonicalParent(registration)),
+  )
+  if (canonicalBoundary !== undefined) {
+    return { registration: canonicalBoundary, boundary: true, source: 'profile' }
+  }
+  const canonicalGraph = newestRegistration(
+    state,
+    registration => registration.moduleSources.has(canonicalParent(registration)),
+  )
+  if (canonicalGraph !== undefined) {
+    return {
+      registration: canonicalGraph,
+      boundary: false,
+      source: canonicalGraph.moduleSources.get(canonicalParent(canonicalGraph))!,
+    }
+  }
+
   // The public Loader fallback evaluates a bare dynamic import from its own
   // module. One DSH process owns one active Profile; during an HMR hand-over,
   // the most recently retained registration is authoritative.
-  return parentURL === LOADER_ENTRY_URL
-    ? newestRegistration(state, () => true)
-    : undefined
+  return undefined
 }
 
 function selectedOverlayCandidate(
   registration: ProfileResolverRegistration,
   packageName: string,
 ): PackageOverlayCandidate {
+  const cached = registration.overlayCandidates.get(packageName)
+  if (cached !== undefined) return cached
   const overlay = findOverlayPackage(packageName, {
     installPackageUrl: DESKTOP_PACKAGE_URL,
     profilePackageUrl: registration.profileBaseUrl,
   })
+  // Missing packages are intentionally not cached: Market/HMR can publish one
+  // while this process is alive.
   if (overlay === undefined) throw new PackageOverlayNotFoundError(packageName)
+  let selected = overlay.selected
   if (overlay.selected.source === 'profile'
     && !isLexicallyWithin(join(registration.profileDirectory, 'node_modules'), overlay.selected.manifestPath)) {
     // findPackageJSON follows Node's ordinary ancestor walk. Only the exact
@@ -225,18 +337,20 @@ function selectedOverlayCandidate(
     // override the sealed Desktop installation. Keep this check lexical so a
     // Profile-owned node_modules symlink into .dsh-module-fallback remains
     // valid while packages above the Profile boundary do not.
-    if (overlay.install !== undefined) return overlay.install
-    throw new PackageOverlayNotFoundError(packageName)
+    if (overlay.install !== undefined) selected = overlay.install
+    else throw new PackageOverlayNotFoundError(packageName)
   }
-  if (overlay.selected.source !== 'profile'
-    || !isSharedFallbackPath(registration, overlay.selected.manifestPath)) {
-    return overlay.selected
+  if (selected.source === 'profile'
+    && (isAsarPath(selected.manifestPath)
+      || isSharedFallbackPath(registration, selected.manifestPath))) {
+    // Older Desktop releases populated profiles/node_modules with an
+    // installation-wide proxy/link tree. It is not an active Profile candidate:
+    // using it can resurrect a dangling path or a previous app generation.
+    if (overlay.install !== undefined) selected = overlay.install
+    else throw new PackageOverlayNotFoundError(packageName)
   }
-  // Older Desktop releases populated profiles/node_modules with an
-  // installation-wide proxy/link tree. It is not an active Profile candidate:
-  // using it can resurrect a dangling path or a previous app generation.
-  if (overlay.install !== undefined) return overlay.install
-  throw new PackageOverlayNotFoundError(packageName)
+  registration.overlayCandidates.set(packageName, selected)
+  return selected
 }
 
 function track(
@@ -244,7 +358,11 @@ function track(
   url: string,
   source: ModuleSource,
 ): void {
-  registration.moduleSources.set(moduleKey(url), source)
+  registration.moduleSources.set(url, source)
+  const candidate = filePath(url)
+  if (candidate === undefined || isAsarPath(candidate)) return
+  const canonical = canonicalModuleKey(registration, url)
+  registration.moduleSources.set(canonical, source)
 }
 
 function resolveFromAnchor(
@@ -293,6 +411,25 @@ function resolveCommonJsFromAnchor(
   }
 }
 
+function resolveCommonJsNormally(
+  state: ProcessResolverState,
+  thisArg: CommonJsModuleResolver,
+  request: string,
+  parent: { filename?: string } | null | undefined,
+  isMain: boolean | undefined,
+  options?: unknown,
+): string {
+  // Node's synchronous hooks also observe CommonJS resolution. Keep the ESM
+  // hook in pass-through mode while the explicit CJS policy calls Node's
+  // original resolver, otherwise one require is classified twice.
+  state.bypassDepth += 1
+  try {
+    return state.previousResolveFilename.call(thisArg, request, parent, isMain, options)
+  } finally {
+    state.bypassDepth -= 1
+  }
+}
+
 function resolveFilenameWithState(
   state: ProcessResolverState,
   thisArg: CommonJsModuleResolver,
@@ -305,14 +442,20 @@ function resolveFilenameWithState(
     return state.previousResolveFilename.call(thisArg, request, parent, isMain, options)
   }
   const parentURL = parent?.filename === undefined ? undefined : pathToFileURL(parent.filename).href
-  const registration = registrationForParent(state, parentURL)
+  const parentRegistration = registrationForParent(state, parentURL)
   const packageName = resolvablePackageName(request)
-  if (registration === undefined || packageName === undefined) {
-    return state.previousResolveFilename.call(thisArg, request, parent, isMain, options)
+  if (parentRegistration === undefined) {
+    return resolveCommonJsNormally(state, thisArg, request, parent, isMain, options)
   }
-  const fromBoundary = isDirectProfileBoundary(registration, parentURL)
-    || parentURL === LOADER_ENTRY_URL
-  if (fromBoundary) {
+  const { registration, boundary, source: parentSource } = parentRegistration
+  if (packageName === undefined) {
+    const resolved = resolveCommonJsNormally(state, thisArg, request, parent, isMain, options)
+    if (parentSource !== undefined && isAbsolute(resolved)) {
+      track(registration, pathToFileURL(resolved).href, parentSource)
+    }
+    return resolved
+  }
+  if (boundary) {
     const selected = selectedOverlayCandidate(registration, packageName)
     const resolved = resolveCommonJsFromAnchor(state, registration, request, selected.source)
     if (selected.source === 'profile' && isObsoleteProfileFallbackPath(registration, resolved)) {
@@ -321,14 +464,11 @@ function resolveFilenameWithState(
     track(registration, pathToFileURL(resolved).href, selected.source)
     return resolved
   }
-  const parentSource = parentURL === undefined
-    ? undefined
-    : registration.moduleSources.get(moduleKey(parentURL))
   if (parentSource === undefined) {
-    return state.previousResolveFilename.call(thisArg, request, parent, isMain, options)
+    return resolveCommonJsNormally(state, thisArg, request, parent, isMain, options)
   }
   try {
-    const resolved = state.previousResolveFilename.call(thisArg, request, parent, isMain, options)
+    const resolved = resolveCommonJsNormally(state, thisArg, request, parent, isMain, options)
     if (parentSource === 'install' || !isObsoleteProfileFallbackPath(registration, resolved)) {
       track(registration, pathToFileURL(resolved).href, parentSource)
       return resolved
@@ -352,14 +492,13 @@ function resolveFilenameWithState(
 
 function resolveForRegistration(
   state: ProcessResolverState,
-  registration: ProfileResolverRegistration,
+  parentRegistration: ParentRegistration,
   specifier: string,
   context: Parameters<ResolveHookSync>[1],
   nextResolve: Parameters<ResolveHookSync>[2],
 ): ReturnType<ResolveHookSync> {
-  const fromBoundary = isDirectProfileBoundary(registration, context.parentURL)
-    || context.parentURL === LOADER_ENTRY_URL
-  const packageName = fromBoundary ? resolvablePackageName(specifier) : undefined
+  const { registration, boundary, source: parentSource } = parentRegistration
+  const packageName = boundary ? resolvablePackageName(specifier) : undefined
   if (packageName !== undefined) {
     const selected = selectedOverlayCandidate(registration, packageName)
     const source = selected.source
@@ -371,9 +510,6 @@ function resolveForRegistration(
     return resolved
   }
 
-  const parentSource = context.parentURL === undefined
-    ? undefined
-    : registration.moduleSources.get(moduleKey(context.parentURL))
   if (parentSource === undefined) return nextResolve(specifier, context)
 
   // Relative paths, package imports, absolute URLs and builtins belong to the
@@ -419,15 +555,39 @@ function resolveWithState(
   nextResolve: Parameters<ResolveHookSync>[2],
 ): ReturnType<ResolveHookSync> {
   if (state.bypassDepth > 0) return nextResolve(specifier, context)
-  const registration = registrationForParent(state, context.parentURL)
-  return registration === undefined
+  const parentRegistration = registrationForParent(state, context.parentURL)
+  return parentRegistration === undefined
     ? nextResolve(specifier, context)
-    : resolveForRegistration(state, registration, specifier, context, nextResolve)
+    : resolveForRegistration(state, parentRegistration, specifier, context, nextResolve)
+}
+
+function migrateResolverState(state: ProcessResolverState): void {
+  let latestSequence = Number.isFinite(state.nextSequence) ? state.nextSequence : 0
+  for (const registration of state.registrations.values()) {
+    const mutable = registration as unknown as {
+      activeSequences?: Set<number>
+      canonicalPaths?: Map<string, string>
+      overlayCandidates?: Map<string, PackageOverlayCandidate>
+    }
+    // v1 is intentionally retained as the process symbol because an earlier
+    // HMR generation already owns the live Node hooks. Upgrade its objects in
+    // place instead of registering a second resolver stack.
+    mutable.canonicalPaths = new Map()
+    mutable.overlayCandidates = new Map()
+    if (!(mutable.activeSequences instanceof Set)) {
+      mutable.activeSequences = new Set(
+        registration.references > 0 ? [registration.sequence] : [],
+      )
+    }
+    latestSequence = Math.max(latestSequence, registration.sequence)
+  }
+  state.nextSequence = latestSequence
 }
 
 function ensureResolverState(): ProcessResolverState {
   const existing = currentResolverState()
   if (existing !== undefined) {
+    migrateResolverState(existing)
     // A hook registered by an earlier HMR generation delegates through this
     // mutable function, so it immediately adopts the current implementation.
     existing.resolve = (specifier, context, nextResolve) => (
@@ -502,14 +662,25 @@ export function installProfilePackageResolver(profileBaseUrl: string): () => voi
       profileDirectory,
       sharedFallbackDirectory: join(dirname(profileDirectory), 'node_modules'),
       moduleSources: new Map(),
+      canonicalPaths: new Map(),
+      overlayCandidates: new Map(),
+      activeSequences: new Set(),
       profileRequire: createRequire(normalizedBaseUrl),
       references: 0,
       sequence: 0,
     }
     state.registrations.set(normalizedBaseUrl, registration)
+    refreshCanonicalProfilePath(registration)
+  } else {
+    // A retain denotes a new Loader/HMR generation. Package presence and
+    // symlink targets may have changed since the preceding generation.
+    registration.overlayCandidates.clear()
+    refreshCanonicalProfilePath(registration)
   }
+  const retainSequence = ++state.nextSequence
   registration.references += 1
-  registration.sequence = ++state.nextSequence
+  registration.activeSequences.add(retainSequence)
+  registration.sequence = retainSequence
   const releaseMarker = retainAsarModuleResolver()
   let active = true
   return () => {
@@ -517,7 +688,16 @@ export function installProfilePackageResolver(profileBaseUrl: string): () => voi
     active = false
     releaseMarker()
     registration!.references -= 1
-    if (registration!.references === 0) state.registrations.delete(normalizedBaseUrl)
+    registration!.activeSequences.delete(retainSequence)
+    if (registration!.references === 0) {
+      state.registrations.delete(normalizedBaseUrl)
+    } else {
+      let latestSequence = 0
+      for (const sequence of registration!.activeSequences) {
+        latestSequence = Math.max(latestSequence, sequence)
+      }
+      registration!.sequence = latestSequence
+    }
     if (state.registrations.size > 0) return
     state.hooks.deregister()
     if (state.commonJsModule._resolveFilename === state.overlayResolveFilename) {
