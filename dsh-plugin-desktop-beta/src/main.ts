@@ -2,7 +2,8 @@
 
 import { app, crashReporter, safeStorage, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   boot,
@@ -13,8 +14,11 @@ import {
   type FailLoudProcess,
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
-import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
+import { defaultDshHome, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import {
+  DSH_LAUNCH_ENVIRONMENT_KEY,
+  type LaunchEnvironmentSnapshot,
+} from '@deepseek-ai/dsh-launch-environment'
 import type {} from '@deepseek-ai/dsh-web-app'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { isDesktopInstallerQuitRequest } from './desktop-installer-quit.ts'
@@ -86,6 +90,13 @@ import {
 } from './desktop-market.ts'
 import DesktopSettingsController from './desktop-settings-controller.ts'
 import {
+  resolveDesktopDataDirectory,
+  selectDesktopDataDirectory,
+  type DesktopDataDirectoryLocation,
+} from './desktop-data-directory.ts'
+import { acquireDesktopDataOperationLock } from './desktop-data-operation-lock.ts'
+import { resetDesktopDataDirectory } from './desktop-factory-reset.ts'
+import {
   clearDesktopProfilePreferences,
   readDesktopProfilePreferences,
   writeDesktopProfilePreferences,
@@ -100,6 +111,7 @@ import {
   DesktopStartupRecoveryWindow,
   type RecoveryWindowResult,
   type DesktopStartupRecoveryConfigurationPaths,
+  type DesktopStartupRecoveryDataActions,
   type DesktopStartupRecoveryProfileActions,
   type DesktopStartupFailureStage,
 } from './startup-recovery-window.ts'
@@ -194,6 +206,21 @@ import { desktopRecoveryCopy } from './recovery-copy.ts'
 
 const BIN_NAME = DESKTOP_PACKAGE_NAME
 const PRODUCT_NAME = DESKTOP_PRODUCT_NAME
+
+function withDesktopDshHome(
+  environment: LaunchEnvironmentSnapshot,
+  homeDir: string,
+): LaunchEnvironmentSnapshot {
+  const entry = Object.freeze({ value: homeDir, source: 'process' as const })
+  return Object.freeze({
+    get: (name: string) => name.toUpperCase() === 'DSH_HOME' ? entry : environment.get(name),
+    getFrom: (name: string, sources: Parameters<LaunchEnvironmentSnapshot['getFrom']>[1]) => {
+      return name.toUpperCase() === 'DSH_HOME' && sources.includes('process')
+        ? entry
+        : environment.getFrom(name, sources)
+    },
+  })
+}
 
 /** Require OS-backed secret storage; Linux's plaintext fallback is not sufficient for a CA key. */
 function desktopLanHttpsPrivateKeyProtector(): DesktopLanHttpsPrivateKeyProtector {
@@ -391,6 +418,7 @@ async function start(): Promise<void> {
   let startupRecoveryConfigurationPaths: DesktopStartupRecoveryConfigurationPaths | undefined
   let profileCheckpoint: DesktopProfileCheckpoint | undefined
   let startupRecoveryProfileActions: DesktopStartupRecoveryProfileActions | undefined
+  let startupRecoveryDataActions: DesktopStartupRecoveryDataActions | undefined
   let safeModePaths: DesktopSafeModePaths | undefined
   let prepareSafeMode: (() => void) | undefined
   let sessionProjectionCacheRecovery:
@@ -563,6 +591,7 @@ async function start(): Promise<void> {
         }),
         ...(recoveryTerminalAvailable ? { openTerminal: () => { runtime.openTerminal() } } : {}),
         ...(startupRecoveryProfileActions === undefined ? {} : { profileActions: startupRecoveryProfileActions }),
+        ...(startupRecoveryDataActions === undefined ? {} : { dataActions: startupRecoveryDataActions }),
         ...(prepareSafeMode === undefined ? {} : { enterSafeMode: prepareSafeMode }),
         ...(safeModePaths === undefined ? {} : { safeModeActive: true }),
       })
@@ -619,8 +648,6 @@ async function start(): Promise<void> {
     })
     for (const [name, value] of Object.entries(shellEnvironmentResolution.updates)) process.env[name] = value
     const profileUserDataDir = safeModePaths?.userDataDir ?? desktopUserDataDir
-    const homeDir = safeModePaths?.homeDir ?? resolveDshHome()
-    if (safeModePaths !== undefined) process.env.DSH_HOME = homeDir
     prepareSafeMode = safeModePaths === undefined
       ? () => {
           const paths = resetDesktopSafeModeEnvironment(desktopUserDataDir)
@@ -637,21 +664,6 @@ async function start(): Promise<void> {
           }
         }
       : undefined
-    const projectionCacheRecovery = recoverOversizedSessionProjectionCache(homeDir)
-    if (projectionCacheRecovery.status === 'quarantined') {
-      sessionProjectionCacheRecovery = projectionCacheRecovery
-      electronLogger.error(
-        `${BIN_NAME}: quarantined oversized session projection cache (${String(projectionCacheRecovery.sizeBytes)} bytes) at `
-          + `${projectionCacheRecovery.cachePath}; backup saved to ${projectionCacheRecovery.backupPath}`,
-      )
-    }
-    const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
-      { label: 'application install', path: process.execPath },
-      { label: 'desktop user data', path: app.getPath('userData') },
-      { label: 'DSH home', path: homeDir },
-    ])
-    warnWindowsVolumeConcerns(electronLogger, windowsVolumeConcerns)
-
     const failLoudProcess: FailLoudProcess = {
       on: (event, handler) => process.on(event, handler),
       off: (event, handler) => process.off(event, handler),
@@ -678,6 +690,37 @@ async function start(): Promise<void> {
     })
     const dshBootstrapPath = fileURLToPath(new URL('./desktop-cli.js', import.meta.url))
     const releasePnpmRuntime = generation.own(() => { pnpmRuntime.dispose() })
+    const fallbackHome = resolveDshHome()
+    const defaultHome = resolve(defaultDshHome())
+    const fallbackSource = process.env.DSH_HOME === undefined ? 'default' : 'environment'
+    let dataDirectoryLocation: DesktopDataDirectoryLocation | undefined
+    let homeDir: string
+    if (safeModePaths !== undefined) {
+      homeDir = safeModePaths.homeDir
+    } else {
+      dataDirectoryLocation = resolveDesktopDataDirectory(
+        desktopUserDataDir,
+        fallbackHome,
+        fallbackSource,
+      )
+      homeDir = dataDirectoryLocation.homeDir
+    }
+    process.env.DSH_HOME = homeDir
+    const desktopLaunchEnvironment = withDesktopDshHome(environment, homeDir)
+    const projectionCacheRecovery = recoverOversizedSessionProjectionCache(homeDir)
+    if (projectionCacheRecovery.status === 'quarantined') {
+      sessionProjectionCacheRecovery = projectionCacheRecovery
+      electronLogger.error(
+        `${BIN_NAME}: quarantined oversized session projection cache (${String(projectionCacheRecovery.sizeBytes)} bytes) at `
+          + `${projectionCacheRecovery.cachePath}; backup saved to ${projectionCacheRecovery.backupPath}`,
+      )
+    }
+    const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
+      { label: 'application install', path: process.execPath },
+      { label: 'desktop user data', path: desktopUserDataDir },
+      { label: 'DSH home', path: homeDir },
+    ])
+    warnWindowsVolumeConcerns(electronLogger, windowsVolumeConcerns)
     const selectionStatePath = join(profileUserDataDir, 'profile-selection', 'state.json')
     const pluginManagementStatePath = join(profileUserDataDir, 'plugin-management', 'state.json')
     const marketUserDataDir = profileUserDataDir
@@ -865,6 +908,99 @@ async function start(): Promise<void> {
       profilePatch: join(activeProfileDir, PROFILE_PATCH_FILENAME),
       profileManifest: join(activeProfileDir, 'package.json'),
       profileDirectory: activeProfileDir,
+    }
+    if (dataDirectoryLocation !== undefined) {
+      const recoveryDataLocation = dataDirectoryLocation
+      const selectRecoveryDataDirectory = async (
+        targetDirectory: string,
+        signal: AbortSignal,
+        operation: string,
+        createIfMissing = false,
+      ): Promise<void> => {
+        const lease = acquireDesktopDataOperationLock(desktopUserDataDir, operation)
+        try {
+          const current = resolveDesktopDataDirectory(
+            desktopUserDataDir,
+            fallbackHome,
+            fallbackSource,
+          )
+          if (current.homeDir !== recoveryDataLocation.homeDir
+            || current.generation !== recoveryDataLocation.generation) {
+            throw new Error(`${BIN_NAME}: active data directory changed while Recovery Assistant was open`)
+          }
+          const selection = await selectDesktopDataDirectory(
+            desktopUserDataDir,
+            current,
+            targetDirectory,
+            { signal, createIfMissing },
+          )
+          if (selection.target.kind === 'existing') {
+            const selectedName = readDesktopProfileState(selectionStatePath).active
+            const available = listDesktopProfiles(selection.location.homeDir)
+              .filter(profile => profile.webCapable && profile.problem === undefined)
+            const nextProfile = available.find(profile => profile.name === selectedName)
+              ?? available.find(profile => profile.name === 'desktop')
+              ?? available[0]
+            if (nextProfile !== undefined && nextProfile.name !== selectedName) {
+              try {
+                selectDesktopProfile(selectionStatePath, selection.location.homeDir, nextProfile.name)
+                expectedRecoveryProfileName = nextProfile.name
+              } catch (cause) {
+                electronLogger.error(
+                  `${BIN_NAME}: selected data directory requires Profile selection in Recovery Assistant: ${cause instanceof Error ? cause.message : String(cause)}`,
+                )
+              }
+            }
+          }
+        } finally {
+          lease.release()
+        }
+      }
+      const normalizedDefaultHome = process.platform === 'win32' ? defaultHome.toLowerCase() : defaultHome
+      const normalizedCurrentHome = process.platform === 'win32'
+        ? recoveryDataLocation.homeDir.toLowerCase()
+        : recoveryDataLocation.homeDir
+      startupRecoveryDataActions = {
+        currentDirectory: recoveryDataLocation.homeDir,
+        usingDefaultDirectory: normalizedCurrentHome === normalizedDefaultHome,
+        defaultDirectoryMissing: () => !existsSync(defaultHome),
+        changeDirectory: async (targetDirectory: string, signal: AbortSignal) => {
+          await selectRecoveryDataDirectory(
+            targetDirectory,
+            signal,
+            'change DSH data directory from Recovery Assistant',
+          )
+        },
+        restoreDefaultDirectory: async (signal: AbortSignal, createIfMissing: boolean) => {
+          await selectRecoveryDataDirectory(
+            defaultHome,
+            signal,
+            'restore default DSH data directory from Recovery Assistant',
+            createIfMissing,
+          )
+        },
+        resetDirectory: async () => {
+          const lease = acquireDesktopDataOperationLock(
+            desktopUserDataDir,
+            'factory reset DSH data directory from Recovery Assistant',
+          )
+          try {
+            await resetDesktopDataDirectory({
+              homeDir: recoveryDataLocation.homeDir,
+              protectedPaths: [
+                app.getPath('home'),
+                app.getPath('appData'),
+                desktopUserDataDir,
+                dirname(process.execPath),
+                process.cwd(),
+              ],
+              trashItem: async path => { await shell.trashItem(path) },
+            })
+          } finally {
+            lease.release()
+          }
+        },
+      }
     }
     if (profileCheckpoint !== undefined) {
       startupRecoveryController = new DesktopStartupRecoveryController({
@@ -1307,7 +1443,7 @@ async function start(): Promise<void> {
           () => releasePackageResolver,
           'dsh-plugin-desktop: profile package resolution',
         )
-        hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
+        hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, desktopLaunchEnvironment)
         hostCtx.provide('desktopBrowserAccess', browserAccess)
         hostCtx.provide('desktopLanHttps', lanHttps)
         hostCtx.provide('desktopRuntime', runtime)

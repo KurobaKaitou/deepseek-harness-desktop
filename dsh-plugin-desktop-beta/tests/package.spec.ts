@@ -114,8 +114,9 @@ describe('published package surface', () => {
 
   it('keeps Beta Safe Mode out of the normal DSH home and Desktop state', () => {
     expect(main).toContain('const profileUserDataDir = safeModePaths?.userDataDir ?? desktopUserDataDir')
-    expect(main).toContain('const homeDir = safeModePaths?.homeDir ?? resolveDshHome()')
-    expect(main).toContain('if (safeModePaths !== undefined) process.env.DSH_HOME = homeDir')
+    expect(main).toContain('if (safeModePaths !== undefined) {\n      homeDir = safeModePaths.homeDir')
+    expect(main).toContain('process.env.DSH_HOME = homeDir')
+    expect(main).toContain('const desktopLaunchEnvironment = withDesktopDshHome(environment, homeDir)')
     expect(main).toContain('createDesktopWebProfile(paths.homeDir, DESKTOP_SAFE_MODE_PROFILE_NAME)')
     expect(main).toContain("join(paths.userDataDir, 'profile-selection', 'state.json')")
     expect(main).toContain('selectDesktopProfile(')
