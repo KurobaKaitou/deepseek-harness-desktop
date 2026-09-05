@@ -13,6 +13,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
 
@@ -29,8 +30,9 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
   build?: {
     productName?: unknown
     appId?: unknown
-    asarUnpack?: unknown
+    asar?: unknown
     afterPack?: unknown
+    afterAllArtifactBuild?: unknown
     npmRebuild?: unknown
     electronFuses?: unknown
     toolsets?: Record<string, unknown>
@@ -40,16 +42,17 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
       extendInfo?: unknown
       hardenedRuntime?: unknown
       icon?: unknown
+      asarUnpack?: unknown
       mergeASARs?: unknown
       notarize?: unknown
       signIgnore?: unknown
       target?: unknown
       x64ArchFiles?: unknown
     }
-    win?: { icon?: unknown; target?: unknown; artifactName?: unknown }
+    win?: { icon?: unknown; asarUnpack?: unknown; target?: unknown; artifactName?: unknown }
     nsis?: Record<string, unknown>
     portable?: Record<string, unknown>
-    linux?: { icon?: unknown }
+    linux?: { icon?: unknown; asarUnpack?: unknown }
   }
   dependencies?: Record<string, unknown>
   optionalDependencies?: Record<string, unknown>
@@ -309,6 +312,30 @@ describe('published package surface', () => {
     ]) {
       expect(patch).toContain(marker)
       expect(installedSettings).toContain(marker)
+    }
+  })
+
+  it('patches alpha app boot to keep packaged Profile fallbacks resolver-owned', () => {
+    const patchPath = './patches/dsh-app-boot@0.1.3-alpha.1.patch'
+    for (const selector of [
+      `@deepseek-ai/dsh-app-boot@npm:${runtimeVersion}`,
+      `@deepseek-ai/dsh-app-boot@npm:^${runtimeVersion}`,
+    ]) {
+      expect(String(workspaceManifest.resolutions?.[selector])).toContain(patchPath)
+    }
+    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
+    const installedAppBoot = readFileSync(new URL(
+      'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+      packageRoot,
+    ), 'utf8')
+    for (const marker of [
+      'Symbol.for("dsh-plugin-desktop.asar-module-resolver")',
+      'healProfileModuleFallback(profile, /* @__PURE__ */ new Set(), installAnchor)',
+      'isInstallationPackage = () => false',
+      'visited.has(dep) || isInstallationPackage(dep)',
+    ]) {
+      expect(patch).toContain(marker)
+      expect(installedAppBoot).toContain(marker)
     }
   })
 
@@ -808,14 +835,28 @@ describe('published package surface', () => {
     expect(manifest.bin).not.toHaveProperty('dsh-plugin-desktop')
     expect(manifest.build?.productName).toBe('DSH Desktop Beta')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop.beta')
-    expect(manifest.build?.asarUnpack).toEqual([
-      'package.json',
-      'cordis.patch.yml',
-      'build/**',
-      'lib/**',
-      'node_modules/**',
+    expect(manifest.build?.asar).toEqual({ smartUnpack: true })
+    expect(manifest.build).not.toHaveProperty('asarUnpack')
+    expect(manifest.build?.mac?.asarUnpack).toEqual([
+      'build/app-icon-mac.png',
+      'build/tray-iconTemplate.png',
+      'build/tray-iconTemplate@2x.png',
     ])
-    expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
+    const windowsAndLinuxIcons = [
+      'build/app-icon.png',
+      'build/tray-icon-blue.png',
+      'build/tray-icon-blue@1.25x.png',
+      'build/tray-icon-blue@1.5x.png',
+      'build/tray-icon-blue@2x.png',
+    ]
+    expect(manifest.build?.win?.asarUnpack).toEqual(windowsAndLinuxIcons)
+    expect(manifest.build?.linux?.asarUnpack).toEqual(windowsAndLinuxIcons)
+    expect(manifest.build?.electronFuses).toEqual({
+      enableEmbeddedAsarIntegrityValidation: true,
+      onlyLoadAppFromAsar: true,
+      resetAdHocDarwinSignature: true,
+      runAsNode: true,
+    })
     expect(manifest.build?.toolsets).toEqual({ nsis: '1.2.1' })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
@@ -871,6 +912,10 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['package:dir'])
       .toBe('yarn run build && yarn run prepare:electron-native && node scripts/package-dir.mjs')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
+    expect(packageDir).toContain("'--config.forceCodeSigning=false'")
+    expect(packageDir).toContain("'--config.mac.identity=null'")
+    expect(packageDir).toContain("'--config.mac.notarize=false'")
+    expect(packageDir).toContain("'--config.win.signExecutable=false'")
     expect(packageDir).toContain("require.resolve('electron/package.json')")
     expect(packageDir).toContain('--config.electronDist=')
     expect(packageDir).toContain('electronBuilderEnvironment')
@@ -908,6 +953,7 @@ describe('published package surface', () => {
     expect(workspaceManifest.scripts?.['dist:win-portable:beta'])
       .toBe('yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop-beta dist:win-portable')
     expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
+    expect(manifest.build?.afterAllArtifactBuild).toBe('./scripts/verify-electron-fuses.ts')
     expect(manifest.build?.mac).toEqual(expect.objectContaining({
       extendInfo: {
         CFBundleAllowMixedLocalizations: true,
@@ -926,6 +972,8 @@ describe('published package surface', () => {
     expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.build?.files).toContain('!node_modules/fs-ext/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
+    expect(manifest.devDependencies?.['@electron/fuses']).toBe('1.8.0')
+    expect(manifest.devDependencies?.['builder-util']).toBe('26.15.3')
   })
 
   it('runs platform package gates before reusing native packaging outputs', () => {
@@ -1085,20 +1133,58 @@ describe('published package surface', () => {
     expect(lockfile).not.toContain('@koromix/koffi-win32-x64@npm:3.1.4')
   })
 
-  it('keeps Node and Electron fs-ext ABIs isolated for the alpha session backend', () => {
+  it('loads fs-ext only for POSIX session locks and skips its Windows install build', () => {
     const patchPath = './patches/fs-ext@2.1.1.patch'
     const patchResolution = `patch:fs-ext@npm%3A2.1.1#${patchPath}`
+    const sessionPatchPath = './patches/dsh-session-persistence-jsonl@0.1.3-alpha.1.patch'
+    const sessionPatchResolution = 'patch:@deepseek-ai/dsh-session-persistence-jsonl@file%3A'
+      + 'vendor/dsh-runtime/0.1.3-alpha.1/'
+      + `deepseek-ai-dsh-session-persistence-jsonl-0.1.3-alpha.1.tgz#${sessionPatchPath}`
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
     const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
+    const sessionPatch = readFileSync(new URL(sessionPatchPath, workspaceRoot), 'utf8')
+    const workspaceRequire = createRequire(new URL('package.json', packageRoot))
+    const fsExtManifestPath = workspaceRequire.resolve('fs-ext/package.json')
+    const installedFsExtManifest = JSON.parse(readFileSync(fsExtManifestPath, 'utf8')) as {
+      scripts?: { install?: unknown }
+    }
+    const installedFsExtInstall = readFileSync(join(dirname(fsExtManifestPath), 'install.js'), 'utf8')
+    const sessionManifestPath = workspaceRequire.resolve(
+      '@deepseek-ai/dsh-session-persistence-jsonl/package.json',
+    )
+    const installedSessionRuntime = readFileSync(
+      join(dirname(sessionManifestPath), 'lib/index.js'),
+      'utf8',
+    )
 
     expect(manifest.dependencies?.['fs-ext']).toBe('2.1.1')
     expect(manifest.devDependencies?.['node-gyp']).toBe('13.0.1')
     expect(workspaceManifest.resolutions).toMatchObject({
       'fs-ext@npm:2.1.1': patchResolution,
+      '@deepseek-ai/dsh-session-persistence-jsonl@npm:0.1.3-alpha.1': sessionPatchResolution,
+      '@deepseek-ai/dsh-session-persistence-jsonl@npm:^0.1.3-alpha.1': sessionPatchResolution,
     })
     expect(lockfile).toContain('fs-ext@patch:fs-ext@npm%3A2.1.1#./patches/fs-ext@2.1.1.patch')
+    expect(lockfile).toContain(sessionPatchPath)
     expect(patch).toContain("if (process.versions.electron)")
     expect(patch).toContain("'/electron.abi' + process.versions.modules + '.node'")
+    expect(patch).toContain('+if (process.platform !== "win32")')
+    expect(patch).toContain('+    "install": "node install.js"')
+    expect(installedFsExtManifest.scripts?.install).toBe('node install.js')
+    expect(installedFsExtInstall).toContain('if (process.platform !== "win32")')
+    expect(installedFsExtInstall).toContain('require.resolve("node-gyp/bin/node-gyp.js")')
+    let windowsInstallRequiredModule = false
+    runInNewContext(installedFsExtInstall, {
+      process: { platform: 'win32' },
+      require: () => {
+        windowsInstallRequiredModule = true
+        throw new Error('Windows fs-ext install must not resolve node-gyp')
+      },
+    })
+    expect(windowsInstallRequiredModule).toBe(false)
+    expect(sessionPatch).toContain('+\tconst { flock } = await import("fs-ext");')
+    expect(installedSessionRuntime).not.toContain('import { flock } from "fs-ext";')
+    expect(installedSessionRuntime).toContain('const { flock } = await import("fs-ext");')
   })
 
   it('hides official plugin-manager and general subprocess consoles on Windows', () => {

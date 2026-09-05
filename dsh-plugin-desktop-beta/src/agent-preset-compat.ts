@@ -1,7 +1,7 @@
 /** Compatibility agent presets for Sessions persisted under a renamed preset id. */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import { parse, stringify } from 'yaml'
 
 /** The preset directory holding the alias presets the launcher materializes. */
@@ -36,6 +36,32 @@ export interface LegacyPresetAliasOptions {
 }
 
 /**
+ * Copy one read-only preset tree using the ASAR-aware filesystem operations
+ * Electron supports for directories and individual files.
+ *
+ * Electron's `cpSync` bridge tries to extract its source as one file. That
+ * cannot represent a directory inside `app.asar`, while `readdirSync` and
+ * `copyFileSync` retain Electron's normal virtual-filesystem semantics.
+ */
+function copyPresetTree(source: string, target: string): void {
+  mkdirSync(target, { recursive: true })
+  const entries = readdirSync(source, { recursive: true, withFileTypes: true })
+  for (const entry of entries) {
+    const sourcePath = join(entry.parentPath, entry.name)
+    const targetPath = join(target, relative(source, sourcePath))
+    if (entry.isDirectory()) {
+      mkdirSync(targetPath, { recursive: true })
+      continue
+    }
+    if (!entry.isFile()) {
+      throw new Error(`dsh-plugin-desktop: shipped agent preset contains an unsupported entry at ${sourcePath}`)
+    }
+    mkdirSync(dirname(targetPath), { recursive: true })
+    copyFileSync(sourcePath, targetPath)
+  }
+}
+
+/**
  * Materialize one alias preset per renamed id that the shipped root no
  * longer supplies.
  *
@@ -61,8 +87,7 @@ export function materializeLegacyPresetAliases(options: LegacyPresetAliasOptions
     if (!existsSync(source)) continue
     const target = join(compatRoot, legacyId)
     rmSync(target, { recursive: true, force: true })
-    mkdirSync(dirname(target), { recursive: true })
-    cpSync(source, target, { recursive: true })
+    copyPresetTree(source, target)
     writeFileSync(join(target, PRESET_METADATA_FILE), aliasMetadata(source, legacyId, shippedId))
     materialized = true
   }

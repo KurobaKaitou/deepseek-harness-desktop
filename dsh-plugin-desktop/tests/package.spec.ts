@@ -29,8 +29,9 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
   build?: {
     productName?: unknown
     appId?: unknown
-    asarUnpack?: unknown
+    asar?: unknown
     afterPack?: unknown
+    afterAllArtifactBuild?: unknown
     electronFuses?: unknown
     toolsets?: Record<string, unknown>
     files?: unknown
@@ -38,16 +39,17 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
       extendInfo?: unknown
       hardenedRuntime?: unknown
       icon?: unknown
+      asarUnpack?: unknown
       mergeASARs?: unknown
       notarize?: unknown
       signIgnore?: unknown
       target?: unknown
       x64ArchFiles?: unknown
     }
-    win?: { icon?: unknown; target?: unknown; artifactName?: unknown }
+    win?: { icon?: unknown; asarUnpack?: unknown; target?: unknown; artifactName?: unknown }
     nsis?: Record<string, unknown>
     portable?: Record<string, unknown>
-    linux?: { icon?: unknown }
+    linux?: { icon?: unknown; asarUnpack?: unknown }
   }
   dependencies?: Record<string, unknown>
   optionalDependencies?: Record<string, unknown>
@@ -421,6 +423,7 @@ describe('published package surface', () => {
     const materialize = main.indexOf('await materializeProfile({', prepare)
     const reprepare = main.indexOf('prepared = prepareDesktopProfile(', materialize)
     const pnpmBootstrap = main.indexOf('const desktopPnpmBootstrap: DesktopPnpmBootstrap = {')
+    const healFallback = main.indexOf('await healDesktopProfileModuleFallback(homeDir, prepared.profile)')
     const boot = main.indexOf('const ctx = await boot')
 
     expect(recover).toBeGreaterThanOrEqual(0)
@@ -434,6 +437,8 @@ describe('published package surface', () => {
     expect(materialize).toBeGreaterThan(prepare)
     expect(reprepare).toBeGreaterThan(materialize)
     expect(pnpmBootstrap).toBeGreaterThan(reprepare)
+    expect(healFallback).toBeGreaterThan(reprepare)
+    expect(healFallback).toBeLessThan(boot)
     expect(boot).toBeGreaterThan(prepare)
     expect(boot).toBeGreaterThan(installDsh)
     expect(main).toContain("'dsh-plugin-desktop: packaged pnpm runtime PATH'")
@@ -444,6 +449,7 @@ describe('published package surface', () => {
     expect(readFileSync(new URL('src/profile.ts', packageRoot), 'utf8'))
       .toContain('const webserverConfig = { host: desktopWebServerHost(networkExposure), port }')
     expect(main).not.toContain("'--port', '0'")
+    expect(main.match(/await healDesktopProfileModuleFallback\(/gu)).toHaveLength(1)
     expect(main).toContain("import { DesktopStartupGeneration } from './startup-generation.ts'")
     expect(main).toContain('async () => { await generation.release() }')
     expect(main).not.toContain('disposePnpmRuntime')
@@ -593,9 +599,11 @@ describe('published package surface', () => {
     const materialMigration = main.indexOf('migrateDesktopWindowMaterialSettings(', browserMigration)
     const lazyImport = main.indexOf('profilePreferences = await writeDesktopProfilePreferences(', materialMigration)
     const existingState = main.indexOf('} else {', lazyImport)
-    const mirrorSettings = main.indexOf('mirrorDesktopProfilePreferences(prepared.settingsDocument, profilePreferences)', existingState)
+    const mirrorSettings = main.indexOf('const profileSettingsChanged = await mirrorDesktopProfilePreferences(', existingState)
     const retryMaterialMigration = main.indexOf('migrateDesktopWindowMaterialSettings(', mirrorSettings)
     const mirrorMarket = main.indexOf('selectDesktopMarketProvider(marketUserDataDir, profilePreferences.market)', retryMaterialMigration)
+    const conditionalReprepare = main.indexOf('if (profileSettingsChanged || windowMaterialMigrated)', mirrorMarket)
+    const existingStateEnd = main.indexOf('// Safe Mode must reach the working surface', conditionalReprepare)
     const runtimeQueue = main.indexOf('const enqueueProfilePreferencesWrite = (')
     const flushEffect = main.indexOf("'dsh-plugin-desktop: flush Profile preference writes'", runtimeQueue)
     const marketController = main.indexOf('selectMarket: async provider => {', flushEffect)
@@ -623,6 +631,9 @@ describe('published package surface', () => {
     expect(mirrorSettings).toBeGreaterThan(existingState)
     expect(retryMaterialMigration).toBeGreaterThan(mirrorSettings)
     expect(mirrorMarket).toBeGreaterThan(retryMaterialMigration)
+    expect(conditionalReprepare).toBeGreaterThan(mirrorMarket)
+    expect(existingStateEnd).toBeGreaterThan(conditionalReprepare)
+    expect(main.slice(conditionalReprepare, existingStateEnd)).toContain('prepared = prepareDesktopProfile(')
     expect(runtimeQueue).toBeGreaterThan(mirrorMarket)
     expect(flushEffect).toBeGreaterThan(runtimeQueue)
     expect(marketStateWrite).toBeGreaterThan(marketController)
@@ -739,14 +750,28 @@ describe('published package surface', () => {
     expect(manifest.version).toBe('2.0.5')
     expect(manifest.build?.productName).toBe('DSH Desktop')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
-    expect(manifest.build?.asarUnpack).toEqual([
-      'package.json',
-      'cordis.patch.yml',
-      'build/**',
-      'lib/**',
-      'node_modules/**',
+    expect(manifest.build?.asar).toEqual({ smartUnpack: true })
+    expect(manifest.build).not.toHaveProperty('asarUnpack')
+    expect(manifest.build?.mac?.asarUnpack).toEqual([
+      'build/app-icon-mac.png',
+      'build/tray-iconTemplate.png',
+      'build/tray-iconTemplate@2x.png',
     ])
-    expect(manifest.build?.electronFuses).toEqual({ runAsNode: true })
+    const windowsAndLinuxIcons = [
+      'build/app-icon.png',
+      'build/tray-icon-blue.png',
+      'build/tray-icon-blue@1.25x.png',
+      'build/tray-icon-blue@1.5x.png',
+      'build/tray-icon-blue@2x.png',
+    ]
+    expect(manifest.build?.win?.asarUnpack).toEqual(windowsAndLinuxIcons)
+    expect(manifest.build?.linux?.asarUnpack).toEqual(windowsAndLinuxIcons)
+    expect(manifest.build?.electronFuses).toEqual({
+      enableEmbeddedAsarIntegrityValidation: true,
+      onlyLoadAppFromAsar: true,
+      resetAdHocDarwinSignature: true,
+      runAsNode: true,
+    })
     expect(manifest.build?.toolsets).toEqual({ nsis: '1.2.1' })
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
@@ -797,6 +822,10 @@ describe('published package surface', () => {
     expect(manifest.scripts?.build).toContain('node scripts/generate-mac-app-icon.mjs')
     expect(manifest.scripts?.['package:dir']).toBe('yarn run build && node scripts/package-dir.mjs')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
+    expect(packageDir).toContain("'--config.forceCodeSigning=false'")
+    expect(packageDir).toContain("'--config.mac.identity=null'")
+    expect(packageDir).toContain("'--config.mac.notarize=false'")
+    expect(packageDir).toContain("'--config.win.signExecutable=false'")
     expect(manifest.scripts?.['dist:mac']).toBe('node scripts/release-mac.ts')
     expect(manifest.scripts?.['dist:mac-smoke']).toBe('node scripts/package-mac.ts')
     expect(manifest.scripts?.['dist:win']).toBe('node scripts/package-win.ts')
@@ -831,6 +860,7 @@ describe('published package surface', () => {
     expect(workspaceManifest.scripts?.['dist:win-portable'])
       .toBe('yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop dist:win-portable')
     expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
+    expect(manifest.build?.afterAllArtifactBuild).toBe('./scripts/verify-electron-fuses.ts')
     expect(manifest.build?.mac).toEqual(expect.objectContaining({
       extendInfo: {
         CFBundleAllowMixedLocalizations: true,
@@ -846,6 +876,7 @@ describe('published package surface', () => {
     }))
     expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
+    expect(manifest.devDependencies?.['@electron/fuses']).toBe('1.8.0')
   })
 
   it('runs platform package gates before reusing native packaging outputs', () => {

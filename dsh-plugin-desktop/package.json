@@ -287,6 +287,7 @@
   "devDependencies": {
     "@base-ui/react": "^1.7.0",
     "@electron/asar": "3.4.1",
+    "@electron/fuses": "1.8.0",
     "@fontsource-variable/inter": "^5.3.0",
     "@tailwindcss/vite": "^4",
     "@types/js-yaml": "^4.0.9",
@@ -295,6 +296,7 @@
     "@types/react-dom": "^18",
     "@types/semver": "^7.7.1",
     "@vitejs/plugin-react": "^6",
+    "builder-util": "26.15.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "electron": "43.3.0",
@@ -314,16 +316,15 @@
   "build": {
     "appId": "ai.deepseek.dsh.desktop",
     "productName": "DSH Desktop",
-    "asar": true,
-    "asarUnpack": [
-      "package.json",
-      "cordis.patch.yml",
-      "build/**",
-      "lib/**",
-      "node_modules/**"
-    ],
+    "asar": {
+      "smartUnpack": true
+    },
     "afterPack": "./scripts/verify-packaged-runtime.ts",
+    "afterAllArtifactBuild": "./scripts/verify-electron-fuses.ts",
     "electronFuses": {
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "resetAdHocDarwinSignature": true,
       "runAsNode": true
     },
     "directories": {
@@ -344,6 +345,11 @@
       "!node_modules/node-pty/build/**"
     ],
     "mac": {
+      "asarUnpack": [
+        "build/app-icon-mac.png",
+        "build/tray-iconTemplate.png",
+        "build/tray-iconTemplate@2x.png"
+      ],
       "target": [
         "dir"
       ],
@@ -366,6 +372,13 @@
       "x64ArchFiles": "**/node_modules/{node-pty/prebuilds/darwin-*/**,node-addon-require-builtin-darwin-*/**,@vscode/ripgrep-darwin-*/**,@img/sharp-darwin-*/**,@img/sharp-libvips-darwin-*/**,@koromix/koffi-darwin-*/**}"
     },
     "win": {
+      "asarUnpack": [
+        "build/app-icon.png",
+        "build/tray-icon-blue.png",
+        "build/tray-icon-blue@1.25x.png",
+        "build/tray-icon-blue@1.5x.png",
+        "build/tray-icon-blue@2x.png"
+      ],
       "target": [
         {
           "target": "nsis",
@@ -392,6 +405,13 @@
       "artifactName": "DSH-Desktop-${version}-${arch}-Setup.${ext}"
     },
     "linux": {
+      "asarUnpack": [
+        "build/app-icon.png",
+        "build/tray-icon-blue.png",
+        "build/tray-icon-blue@1.25x.png",
+        "build/tray-icon-blue@1.5x.png",
+        "build/tray-icon-blue@2x.png"
+      ],
       "target": [
         "dir"
       ],

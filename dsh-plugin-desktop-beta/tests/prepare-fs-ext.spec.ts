@@ -55,8 +55,9 @@ describe('fs-ext Electron binding preparation', () => {
     const log = vi.fn()
 
     const result = prepareFsExtForElectron({
-      platform: process.platform,
-      arch: process.arch,
+      platform: 'linux',
+      hostPlatform: 'linux',
+      arch: 'x64',
       fsExtRoot: value.fsExtRoot,
       nanRoot: value.nanRoot,
       nodeGypCli: value.nodeGypCli,
@@ -73,7 +74,7 @@ describe('fs-ext Electron binding preparation', () => {
         writeFileSync(join(invocation.cwd, 'build', 'Release', 'fs_ext.node'), 'electron-binding')
         writeFileSync(
           join(invocation.cwd, 'build', 'config.gypi'),
-          JSON.stringify({ variables: { node_module_version: 148, target_arch: process.arch } }),
+          JSON.stringify({ variables: { node_module_version: 148, target_arch: 'x64' } }),
         )
       },
       log,
@@ -88,7 +89,7 @@ describe('fs-ext Electron binding preparation', () => {
         '--runtime=electron',
         '--target=43.3.0',
         '--dist-url=https://electronjs.org/headers',
-        `--arch=${process.arch}`,
+        '--arch=x64',
       ],
       cwd: temporarySource,
       env: { SAFE_VALUE: 'kept' },
@@ -97,18 +98,21 @@ describe('fs-ext Electron binding preparation', () => {
       path: join(
         value.fsExtRoot,
         'prebuilds',
-        `${process.platform}-${process.arch}`,
+        'linux-x64',
         'electron.abi148.node',
       ),
-      platform: process.platform,
-      arch: process.arch,
+      status: 'prepared',
+      platform: 'linux',
+      arch: 'x64',
       electronVersion: '43.3.0',
       abi: '148',
     })
+    expect(result.status).toBe('prepared')
+    if (result.status !== 'prepared') throw new Error('expected a prepared POSIX binding')
     expect(readFileSync(result.path, 'utf8')).toBe('electron-binding')
     expect(readFileSync(value.nodeBinding, 'utf8')).toBe('node-abi-binding')
     expect(existsSync(temporarySource)).toBe(false)
-    expect(readdirSync(join(value.fsExtRoot, 'prebuilds', `${process.platform}-${process.arch}`)))
+    expect(readdirSync(join(value.fsExtRoot, 'prebuilds', 'linux-x64')))
       .toEqual(['electron.abi148.node'])
     expect(log).toHaveBeenCalledOnce()
   })
@@ -118,8 +122,9 @@ describe('fs-ext Electron binding preparation', () => {
     let temporarySource = ''
 
     expect(() => prepareFsExtForElectron({
-      platform: process.platform,
-      arch: process.arch,
+      platform: 'linux',
+      hostPlatform: 'linux',
+      arch: 'x64',
       fsExtRoot: value.fsExtRoot,
       nanRoot: value.nanRoot,
       nodeGypCli: value.nodeGypCli,
@@ -133,6 +138,30 @@ describe('fs-ext Electron binding preparation', () => {
     expect(existsSync(temporarySource)).toBe(false)
     expect(readFileSync(value.nodeBinding, 'utf8')).toBe('node-abi-binding')
     expect(existsSync(join(value.fsExtRoot, 'prebuilds'))).toBe(false)
+  })
+
+  it('returns not-required on Windows without resolving or running node-gyp', () => {
+    const runBuild = vi.fn()
+    const log = vi.fn()
+
+    expect(prepareFsExtForElectron({
+      platform: 'win32',
+      hostPlatform: 'win32',
+      arch: 'x64',
+      desktopRoot: 'C:\\missing-desktop-root',
+      fsExtRoot: 'C:\\missing-fs-ext',
+      nanRoot: 'C:\\missing-nan',
+      nodeGypCli: 'C:\\missing-node-gyp.js',
+      electronVersion: '43.3.0',
+      runBuild,
+      log,
+    })).toEqual({
+      status: 'not-required',
+      platform: 'win32',
+      arch: 'x64',
+    })
+    expect(runBuild).not.toHaveBeenCalled()
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('not required on Windows'))
   })
 
   it('rejects cross-platform compilation before invoking node-gyp', () => {
